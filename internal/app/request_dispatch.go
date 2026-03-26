@@ -18,12 +18,53 @@ func streamRequestTimeout(cfg AppConfig) time.Duration {
 	return time.Duration(maxInt(cfg.TimeoutSec, defaultStreamingRequestTimeoutSec)) * time.Second
 }
 
+func noEligibleAccountsError() error {
+	return fmt.Errorf("no eligible accounts available; check cooldown, quota, disabled state, or login status")
+}
+
+func mergeDispatchCandidates(preferred *NotionAccount, candidates []NotionAccount) []NotionAccount {
+	out := make([]NotionAccount, 0, len(candidates)+1)
+	seen := map[string]struct{}{}
+	appendCandidate := func(account NotionAccount) {
+		key := canonicalEmailKey(account.Email)
+		if key == "" {
+			return
+		}
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		out = append(out, account)
+	}
+	if preferred != nil {
+		appendCandidate(*preferred)
+	}
+	for _, account := range candidates {
+		appendCandidate(account)
+	}
+	return out
+}
+
 func resolveDispatchCandidates(cfg AppConfig, request PromptRunRequest, now time.Time) ([]NotionAccount, error) {
 	pinnedEmail := strings.TrimSpace(request.PinnedAccountEmail)
+	poolCandidates := pickDispatchCandidates(cfg, now)
 	if pinnedEmail == "" {
-		candidates := pickDispatchCandidates(cfg, now)
+		if len(poolCandidates) == 0 {
+			return nil, noEligibleAccountsError()
+		}
+		return poolCandidates, nil
+	}
+	if request.AllowPinnedAccountFallback {
+		var preferred *NotionAccount
+		if account, _, ok := cfg.FindAccount(pinnedEmail); ok {
+			account = ensureAccountPaths(cfg, account)
+			if eligible, _ := accountDispatchEligible(cfg, account, now); eligible {
+				preferred = &account
+			}
+		}
+		candidates := mergeDispatchCandidates(preferred, poolCandidates)
 		if len(candidates) == 0 {
-			return nil, fmt.Errorf("no eligible accounts available; check cooldown, quota, disabled state, or login status")
+			return nil, noEligibleAccountsError()
 		}
 		return candidates, nil
 	}

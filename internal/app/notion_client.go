@@ -181,6 +181,7 @@ type PromptRunRequest struct {
 	UseWebSearch                      bool
 	Attachments                       []InputAttachment
 	PinnedAccountEmail                string
+	AllowPinnedAccountFallback        bool
 	StreamReasoningWarmup             bool
 	SuppressUpstreamThreadPersistence bool
 	SessionFingerprint                string

@@ -71,6 +71,24 @@ func resolveStaticAdminDir(preferred string) string {
 	return filepath.Clean(preferred)
 }
 
+func requestedAdminDispatchMode(payload map[string]any) string {
+	mode := strings.TrimSpace(strings.ToLower(stringValue(payload["dispatch_mode"])))
+	switch mode {
+	case "active", "pinned", "pin":
+		return "active"
+	case "pool", "auto", "":
+		if boolValue(payload["pin_active_account"]) {
+			return "active"
+		}
+		return "pool"
+	default:
+		if boolValue(payload["pin_active_account"]) {
+			return "active"
+		}
+		return "pool"
+	}
+}
+
 func adminSyncRequestTimeout(cfg AppConfig) time.Duration {
 	timeout := time.Duration(maxInt(cfg.TimeoutSec, 1)) * time.Second
 	if timeout < adminSyncRequestTimeoutMin {
@@ -684,8 +702,11 @@ func (a *App) handleAdminTest(w http.ResponseWriter, r *http.Request) {
 		Attachments:                       attachments,
 		SuppressUpstreamThreadPersistence: strings.TrimSpace(preferredConversationID) == "",
 	}
-	if account, _, ok := cfg.ResolveActiveAccount(); ok {
-		request.PinnedAccountEmail = account.Email
+	request.PinnedAccountEmail = requestedAccountEmail(r, payload)
+	if request.PinnedAccountEmail == "" && requestedAdminDispatchMode(payload) == "active" {
+		if account, _, ok := cfg.ResolveActiveAccount(); ok {
+			request.PinnedAccountEmail = account.Email
+		}
 	}
 	conversation := ConversationEntry{}
 	if preferredConversationID != "" {

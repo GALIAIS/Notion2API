@@ -640,6 +640,18 @@ func requestedAccountEmail(r *http.Request, payload map[string]any) string {
 	return ""
 }
 
+func preferActiveAccountForRequest(cfg AppConfig, request *PromptRunRequest) {
+	if request == nil || strings.TrimSpace(request.PinnedAccountEmail) != "" {
+		return
+	}
+	if account, _, ok := cfg.ResolveActiveAccount(); ok {
+		if email := strings.TrimSpace(account.Email); email != "" {
+			request.PinnedAccountEmail = email
+			request.AllowPinnedAccountFallback = true
+		}
+	}
+}
+
 func resolveRequestPromptForContinuation(normalized NormalizedInput) string {
 	return firstNonEmpty(strings.TrimSpace(normalized.DisplayPrompt), strings.TrimSpace(normalized.Prompt))
 }
@@ -992,6 +1004,7 @@ func (a *App) handleSillyTavernChatCompletionsPayload(w http.ResponseWriter, r *
 		}
 	} else {
 		request.PinnedAccountEmail = requestedAccountEmail(r, payload)
+		preferActiveAccountForRequest(cfg, &request)
 		if ctx.Mode == sillyTavernModeQuiet || ctx.Mode == sillyTavernModeImpersona {
 			request.SuppressUpstreamThreadPersistence = true
 		}

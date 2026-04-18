@@ -28,17 +28,23 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 FROM mcr.microsoft.com/playwright:v1.58.0-noble
 
 ENV TZ=Asia/Shanghai
-ENV CHROME_BIN=/ms-playwright/chromium-1208/chrome-linux64/chrome
-ENV CHROMIUM_BIN=/ms-playwright/chromium-1208/chrome-linux64/chrome
+ENV PLAYWRIGHT_CHROME_BIN=/opt/playwright-helper/chrome
+ENV CHROME_BIN=/opt/playwright-helper/chrome
+ENV CHROMIUM_BIN=/opt/playwright-helper/chrome
 ENV NODE_PATH=/opt/playwright-helper/node_modules
 WORKDIR /app
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates tzdata curl \
     && rm -rf /var/lib/apt/lists/* \
-    && test -x "$CHROME_BIN" \
-    && "$CHROME_BIN" --version | grep -F "145.0.7632.6" \
-    && mkdir -p /app/config /app/data/notion_accounts /app/static
+    && browser_bin="" \
+    && for candidate in /ms-playwright/chromium-*/chrome-linux64/chrome /ms-playwright/chromium-*/chrome-linux/chrome; do \
+        if [ -x "$candidate" ]; then browser_bin="$candidate"; break; fi; \
+    done \
+    && test -n "$browser_bin" \
+    && mkdir -p /opt/playwright-helper /app/config /app/data/notion_accounts /app/static \
+    && ln -sf "$browser_bin" "$PLAYWRIGHT_CHROME_BIN" \
+    && "$PLAYWRIGHT_CHROME_BIN" --version
 
 RUN mkdir -p /opt/playwright-helper \
     && cd /opt/playwright-helper \

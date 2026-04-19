@@ -35,7 +35,7 @@ ENV NODE_PATH=/opt/playwright-helper/node_modules
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates tzdata curl \
+    && apt-get install -y --no-install-recommends ca-certificates tzdata curl tini \
     && rm -rf /var/lib/apt/lists/* \
     && browser_bin="" \
     && for candidate in /ms-playwright/chromium-*/chrome-linux64/chrome /ms-playwright/chromium-*/chrome-linux/chrome; do \
@@ -65,5 +65,5 @@ EXPOSE 8787
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD curl -fsS http://127.0.0.1:8787/healthz || exit 1
 
-ENTRYPOINT ["docker-entrypoint.sh"]
+ENTRYPOINT ["tini", "--", "docker-entrypoint.sh"]
 CMD ["./notion2api", "--config", "/app/config/config.json"]

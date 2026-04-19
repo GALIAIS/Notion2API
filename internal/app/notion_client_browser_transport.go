@@ -19,6 +19,7 @@ const (
 	browserTransportBootstrapDelay = 2 * time.Second
 	browserTransportViewportWidth  = 1440
 	browserTransportViewportHeight = 900
+	browserHelperCancelWaitDelay   = 2 * time.Second
 )
 
 const browserTransportFetchPageScript = `async (input) => {
@@ -135,6 +136,19 @@ BROWSER_FETCH_SCRIPT = %q
 
 def main():
     request = json.load(sys.stdin)
+    browser = None
+    context = None
+    page = None
+    result = None
+
+    def close_quietly(handle):
+        if handle is None:
+            return
+        try:
+            handle.close()
+        except Exception:
+            pass
+
     launch_kwargs = {
         "headless": True,
         "args": [
@@ -149,52 +163,54 @@ def main():
         launch_kwargs["executable_path"] = browser_path
 
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(**launch_kwargs)
-        context_kwargs = {
-            "ignore_https_errors": True,
-            "timezone_id": request.get("timezone_id") or "Asia/Shanghai",
-            "viewport": {
-                "width": int(request.get("viewport_width") or 1440),
-                "height": int(request.get("viewport_height") or 900),
-            },
-        }
-        user_agent = (request.get("user_agent") or "").strip()
-        if user_agent:
-            context_kwargs["user_agent"] = user_agent
-        locale = (request.get("locale") or "").strip()
-        if locale:
-            context_kwargs["locale"] = locale
-        context = browser.new_context(**context_kwargs)
+        try:
+            browser = playwright.chromium.launch(**launch_kwargs)
+            context_kwargs = {
+                "ignore_https_errors": True,
+                "timezone_id": request.get("timezone_id") or "Asia/Shanghai",
+                "viewport": {
+                    "width": int(request.get("viewport_width") or 1440),
+                    "height": int(request.get("viewport_height") or 900),
+                },
+            }
+            user_agent = (request.get("user_agent") or "").strip()
+            if user_agent:
+                context_kwargs["user_agent"] = user_agent
+            locale = (request.get("locale") or "").strip()
+            if locale:
+                context_kwargs["locale"] = locale
+            context = browser.new_context(**context_kwargs)
 
-        cookies = []
-        origin_url = request.get("origin_url") or ""
-        for item in request.get("cookies") or []:
-            name = (item.get("name") or "").strip()
-            if not name:
-                continue
-            cookies.append({
-                "name": name,
-                "value": item.get("value") or "",
-                "url": origin_url,
-            })
-        if cookies:
-            context.add_cookies(cookies)
+            cookies = []
+            origin_url = request.get("origin_url") or ""
+            for item in request.get("cookies") or []:
+                name = (item.get("name") or "").strip()
+                if not name:
+                    continue
+                cookies.append({
+                    "name": name,
+                    "value": item.get("value") or "",
+                    "url": origin_url,
+                })
+            if cookies:
+                context.add_cookies(cookies)
 
-        page = context.new_page()
-        page.goto(request["ai_url"], wait_until="domcontentloaded")
-        page.wait_for_timeout(int(request.get("bootstrap_delay_ms") or 2000))
-        result = page.evaluate(
-            BROWSER_FETCH_SCRIPT,
-            {
-                "run_url": request["run_url"],
-                "headers": request["headers"],
-                "payload": request["payload"],
-                "idle_after_answer_ms": request.get("idle_after_answer_ms") or 5000,
-            },
-        )
-        page.close()
-        context.close()
-        browser.close()
+            page = context.new_page()
+            page.goto(request["ai_url"], wait_until="domcontentloaded")
+            page.wait_for_timeout(int(request.get("bootstrap_delay_ms") or 2000))
+            result = page.evaluate(
+                BROWSER_FETCH_SCRIPT,
+                {
+                    "run_url": request["run_url"],
+                    "headers": request["headers"],
+                    "payload": request["payload"],
+                    "idle_after_answer_ms": request.get("idle_after_answer_ms") or 5000,
+                },
+            )
+        finally:
+            close_quietly(page)
+            close_quietly(context)
+            close_quietly(browser)
 
     sys.stdout.write(json.dumps(result))
 
@@ -223,6 +239,19 @@ const browserFetchScript = eval('(' + browserFetchScriptSource + ')');
 
 (async () => {
   const input = JSON.parse(fs.readFileSync(0, 'utf8'));
+  let browser;
+  let context;
+  let page;
+  let result;
+  const closeQuietly = async (handle) => {
+    if (!handle) {
+      return;
+    }
+    try {
+      await handle.close();
+    } catch (_) {
+    }
+  };
   const launchOptions = {
     headless: true,
     args: [
@@ -236,53 +265,57 @@ const browserFetchScript = eval('(' + browserFetchScriptSource + ')');
     launchOptions.executablePath = input.browser_path.trim();
   }
 
-  const browser = await chromium.launch(launchOptions);
-  const contextOptions = {
-    ignoreHTTPSErrors: true,
-    timezoneId: input.timezone_id || 'Asia/Shanghai',
-    viewport: {
-      width: Number(input.viewport_width || 1440),
-      height: Number(input.viewport_height || 900),
-    },
-  };
-  if ((input.user_agent || '').trim()) {
-    contextOptions.userAgent = input.user_agent.trim();
-  }
-  if ((input.locale || '').trim()) {
-    contextOptions.locale = input.locale.trim();
-  }
-  const context = await browser.newContext(contextOptions);
-
-  const cookies = [];
-  const originURL = (input.origin_url || '').trim();
-  for (const item of input.cookies || []) {
-    const name = String(item.name || '').trim();
-    if (!name) {
-      continue;
+  try {
+    browser = await chromium.launch(launchOptions);
+    const contextOptions = {
+      ignoreHTTPSErrors: true,
+      timezoneId: input.timezone_id || 'Asia/Shanghai',
+      viewport: {
+        width: Number(input.viewport_width || 1440),
+        height: Number(input.viewport_height || 900),
+      },
+    };
+    if ((input.user_agent || '').trim()) {
+      contextOptions.userAgent = input.user_agent.trim();
     }
-    cookies.push({
-      name,
-      value: String(item.value || ''),
-      url: originURL,
-    });
-  }
-  if (cookies.length > 0) {
-    await context.addCookies(cookies);
-  }
+    if ((input.locale || '').trim()) {
+      contextOptions.locale = input.locale.trim();
+    }
+    context = await browser.newContext(contextOptions);
 
-  const page = await context.newPage();
-  await page.goto(input.ai_url, { waitUntil: 'domcontentloaded' });
-  await page.waitForTimeout(Number(input.bootstrap_delay_ms || 2000));
-  const result = await page.evaluate(browserFetchScript, {
-    run_url: input.run_url,
-    headers: input.headers,
-    payload: input.payload,
-    idle_after_answer_ms: Number(input.idle_after_answer_ms || 5000),
-  });
+    const cookies = [];
+    const originURL = (input.origin_url || '').trim();
+    for (const item of input.cookies || []) {
+      const name = String(item.name || '').trim();
+      if (!name) {
+        continue;
+      }
+      cookies.push({
+        name,
+        value: String(item.value || ''),
+        url: originURL,
+      });
+    }
+    if (cookies.length > 0) {
+      await context.addCookies(cookies);
+    }
+
+    page = await context.newPage();
+    await page.goto(input.ai_url, { waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(Number(input.bootstrap_delay_ms || 2000));
+    result = await page.evaluate(browserFetchScript, {
+      run_url: input.run_url,
+      headers: input.headers,
+      payload: input.payload,
+      idle_after_answer_ms: Number(input.idle_after_answer_ms || 5000),
+    });
+  } finally {
+    await closeQuietly(page);
+    await closeQuietly(context);
+    await closeQuietly(browser);
+  }
 
   process.stdout.write(JSON.stringify(result));
-  await context.close();
-  await browser.close();
 })().catch((error) => {
   console.error(error && error.stack ? error.stack : String(error));
   process.exit(1);
@@ -442,15 +475,13 @@ func runPlaywrightBrowserHelper(ctx context.Context, runtimeName string, extensi
 		return "", err
 	}
 
-	cmd := exec.CommandContext(ctx, runtimeName, scriptPath)
-	cmd.Stdin = bytes.NewReader(requestPayload)
-	cmd.Env = append(os.Environ(), extraEnv...)
+	cmd := newBrowserHelperCommand(ctx, runtimeName, scriptPath, requestPayload, extraEnv)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	if err := cmd.Run(); err != nil {
+	if err := runBrowserHelperCommand(ctx, cmd); err != nil {
 		return "", classifyBrowserHelperExecError(ctx, runtimeName, err, stderr.String())
 	}
 
@@ -465,6 +496,71 @@ func runPlaywrightBrowserHelper(ctx context.Context, runtimeName string, extensi
 		return "", err
 	}
 	return response.Text, nil
+}
+
+func newBrowserHelperCommand(ctx context.Context, runtimeName string, scriptPath string, requestPayload []byte, extraEnv []string) *exec.Cmd {
+	_ = ctx
+	cmd := exec.CommandContext(context.Background(), runtimeName, scriptPath)
+	cmd.Stdin = bytes.NewReader(requestPayload)
+	cmd.Env = append(os.Environ(), extraEnv...)
+	cmd.WaitDelay = browserHelperCancelWaitDelay
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			return err
+		}
+		return nil
+	}
+	configureBrowserHelperCommand(cmd)
+	return cmd
+}
+
+func runBrowserHelperCommand(ctx context.Context, cmd *exec.Cmd) error {
+	if cmd == nil {
+		return fmt.Errorf("browser helper command is nil")
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	waitCh := make(chan error, 1)
+	go func() {
+		waitCh <- cmd.Wait()
+	}()
+	if ctx == nil {
+		return <-waitCh
+	}
+	select {
+	case err := <-waitCh:
+		return err
+	case <-ctx.Done():
+		cancelErr := cancelBrowserHelperCommand(cmd)
+		waitErr := <-waitCh
+		if waitErr != nil {
+			return waitErr
+		}
+		if cancelErr != nil {
+			return cancelErr
+		}
+		return ctx.Err()
+	}
+}
+
+func cancelBrowserHelperCommand(cmd *exec.Cmd) error {
+	if cmd == nil {
+		return nil
+	}
+	if cmd.Cancel != nil {
+		return cmd.Cancel()
+	}
+	if cmd.Process == nil {
+		return nil
+	}
+	if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		return err
+	}
+	return nil
 }
 
 func classifyBrowserHelperExecError(ctx context.Context, runtimeName string, runErr error, stderrText string) error {

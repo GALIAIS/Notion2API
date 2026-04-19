@@ -3,8 +3,12 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -135,4 +139,142 @@ func TestClassifyBrowserHelperExecErrorPrefersContextDeadline(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context cancellation, got %v", err)
 	}
+}
+
+func TestNodePlaywrightBrowserHelperScriptClosesResourcesInFinally(t *testing.T) {
+	script := nodePlaywrightBrowserHelperScript()
+
+	required := []string{
+		"let browser;",
+		"let context;",
+		"let page;",
+		"const closeQuietly = async (handle) => {",
+		"try {",
+		"finally {",
+		"await closeQuietly(page);",
+		"await closeQuietly(context);",
+		"await closeQuietly(browser);",
+	}
+	for _, needle := range required {
+		if !strings.Contains(script, needle) {
+			t.Fatalf("node helper script missing cleanup fragment %q", needle)
+		}
+	}
+}
+
+func TestPythonPlaywrightBrowserHelperScriptClosesResourcesInFinally(t *testing.T) {
+	script := pythonPlaywrightBrowserHelperScript()
+
+	required := []string{
+		"browser = None",
+		"context = None",
+		"page = None",
+		"def close_quietly(handle):",
+		"try:",
+		"finally:",
+		"close_quietly(page)",
+		"close_quietly(context)",
+		"close_quietly(browser)",
+	}
+	for _, needle := range required {
+		if !strings.Contains(script, needle) {
+			t.Fatalf("python helper script missing cleanup fragment %q", needle)
+		}
+	}
+}
+
+func TestNewBrowserHelperCommandConfiguresCancellation(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	cmd := newBrowserHelperCommand(ctx, "node", "helper.cjs", []byte("{}"), []string{"CODEX_TEST_ENV=1"})
+	if cmd == nil {
+		t.Fatalf("expected command")
+	}
+	if cmd.Cancel == nil {
+		t.Fatalf("expected custom cancel handler")
+	}
+	if got, want := cmd.WaitDelay, browserHelperCancelWaitDelay; got != want {
+		t.Fatalf("WaitDelay = %s, want %s", got, want)
+	}
+	foundEnv := false
+	for _, entry := range cmd.Env {
+		if entry == "CODEX_TEST_ENV=1" {
+			foundEnv = true
+			break
+		}
+	}
+	if !foundEnv {
+		t.Fatalf("expected extra env to be appended")
+	}
+	if runtime.GOOS != "windows" && !browserHelperUsesProcessGroupKill(cmd) {
+		t.Fatalf("expected process-group cleanup on %s", runtime.GOOS)
+	}
+}
+
+func TestNewBrowserHelperCommandKillsProcessGroupOnCancel(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process-group cleanup test is linux/unix specific")
+	}
+
+	tmpDir := t.TempDir()
+	pidFile := filepath.Join(tmpDir, "child.pid")
+	scriptPath := filepath.Join(tmpDir, "spawn-child.sh")
+	script := fmt.Sprintf("#!/bin/sh\nsleep 30 &\necho $! > %q\nwait\n", pidFile)
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write script failed: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cmd := newBrowserHelperCommand(ctx, "sh", scriptPath, []byte("{}"), nil)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start command failed: %v", err)
+	}
+
+	childPID := waitForBrowserHelperChildPID(t, pidFile)
+	if alive, err := browserHelperProcessAlive(childPID); err != nil {
+		t.Fatalf("check child process %d failed: %v", childPID, err)
+	} else if !alive {
+		t.Fatalf("expected child process %d to be alive", childPID)
+	}
+
+	cancel()
+	_ = cmd.Wait()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		alive, err := browserHelperProcessAlive(childPID)
+		if err != nil {
+			t.Fatalf("check child process %d failed: %v", childPID, err)
+		}
+		if !alive {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("expected child process %d to exit after cancellation", childPID)
+}
+
+func waitForBrowserHelperChildPID(t *testing.T, pidFile string) int {
+	t.Helper()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(pidFile)
+		if err == nil {
+			pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data)))
+			if parseErr != nil {
+				t.Fatalf("parse child pid failed: %v", parseErr)
+			}
+			if pid <= 0 {
+				t.Fatalf("invalid child pid %d", pid)
+			}
+			return pid
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for child pid file %s", pidFile)
+	return 0
 }

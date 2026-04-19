@@ -24,11 +24,116 @@ const (
 	browserTransportViewportHeight = 900
 )
 
-const pythonPlaywrightBrowserHelperScript = `import json
+const browserTransportFetchPageScript = `async (input) => {
+  const response = await fetch(input.run_url, {
+    method: 'POST',
+    credentials: 'include',
+    headers: input.headers,
+    body: JSON.stringify(input.payload),
+  });
+  const result = {
+    status: response.status,
+    content_type: response.headers.get('content-type') || '',
+    text: '',
+  };
+  const contentType = String(result.content_type || '').toLowerCase();
+  if (!response.body || typeof response.body.getReader !== 'function' || !contentType.includes('application/x-ndjson')) {
+    result.text = await response.text();
+    return result;
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const idleAfterAnswerMs = Math.max(Number(input.idle_after_answer_ms || 0), 0);
+  let pending = '';
+  let sawAnswer = false;
+  let sawTerminal = false;
+
+  const markLineState = (line) => {
+    if (!line) {
+      return;
+    }
+    try {
+      const parsed = JSON.parse(line);
+      if (String(parsed.type || '').toLowerCase() !== 'agent-inference' || !Array.isArray(parsed.value)) {
+        return;
+      }
+      const hasVisibleText = parsed.value.some((item) => {
+        const entryType = String((item && item.type) || '').toLowerCase();
+        const content = String((item && item.content) || '');
+        return entryType === 'text' && content.trim() !== '';
+      });
+      if (!hasVisibleText) {
+        return;
+      }
+      sawAnswer = true;
+      if (parsed.finishedAt != null) {
+        sawTerminal = true;
+      }
+    } catch (_) {
+    }
+  };
+
+  const noteChunk = (chunk) => {
+    if (!chunk) {
+      return;
+    }
+    result.text += chunk;
+    pending += chunk;
+    while (true) {
+      const newlineIndex = pending.indexOf('\n');
+      if (newlineIndex === -1) {
+        break;
+      }
+      const line = pending.slice(0, newlineIndex).trim();
+      pending = pending.slice(newlineIndex + 1);
+      markLineState(line);
+    }
+  };
+
+  try {
+    while (true) {
+      if (sawTerminal) {
+        await reader.cancel().catch(() => {});
+        break;
+      }
+
+      let readResult;
+      if (sawAnswer && idleAfterAnswerMs > 0) {
+        const raced = await Promise.race([
+          reader.read().then((value) => ({ kind: 'read', value })),
+          new Promise((resolve) => setTimeout(() => resolve({ kind: 'idle' }), idleAfterAnswerMs)),
+        ]);
+        if (raced.kind === 'idle') {
+          await reader.cancel().catch(() => {});
+          break;
+        }
+        readResult = raced.value;
+      } else {
+        readResult = await reader.read();
+      }
+
+      if (!readResult || readResult.done) {
+        break;
+      }
+      noteChunk(decoder.decode(readResult.value, { stream: true }));
+    }
+  } finally {
+    noteChunk(decoder.decode());
+    markLineState(pending.trim());
+  }
+
+  return result;
+}`
+
+func pythonPlaywrightBrowserHelperScript() string {
+	return fmt.Sprintf(`import json
 import sys
 import traceback
 
 from playwright.sync_api import sync_playwright
+
+BROWSER_FETCH_SCRIPT = %q
 
 
 def main():
@@ -82,23 +187,12 @@ def main():
         page.goto(request["ai_url"], wait_until="domcontentloaded")
         page.wait_for_timeout(int(request.get("bootstrap_delay_ms") or 2000))
         result = page.evaluate(
-            """async (input) => {
-  const response = await fetch(input.run_url, {
-    method: 'POST',
-    credentials: 'include',
-    headers: input.headers,
-    body: JSON.stringify(input.payload),
-  });
-  return {
-    status: response.status,
-    content_type: response.headers.get('content-type') || '',
-    text: await response.text(),
-  };
-}""",
+            BROWSER_FETCH_SCRIPT,
             {
                 "run_url": request["run_url"],
                 "headers": request["headers"],
                 "payload": request["payload"],
+                "idle_after_answer_ms": request.get("idle_after_answer_ms") or 5000,
             },
         )
         page.close()
@@ -114,9 +208,11 @@ if __name__ == "__main__":
     except Exception:
         traceback.print_exc(file=sys.stderr)
         raise
-`
+`, browserTransportFetchPageScript)
+}
 
-const nodePlaywrightBrowserHelperScript = `const fs = require('fs');
+func nodePlaywrightBrowserHelperScript() string {
+	return fmt.Sprintf(`const fs = require('fs');
 
 let chromium;
 try {
@@ -124,6 +220,9 @@ try {
 } catch (error) {
   ({ chromium } = require('playwright'));
 }
+
+const browserFetchScriptSource = %q;
+const browserFetchScript = eval('(' + browserFetchScriptSource + ')');
 
 (async () => {
   const input = JSON.parse(fs.readFileSync(0, 'utf8'));
@@ -177,22 +276,11 @@ try {
   const page = await context.newPage();
   await page.goto(input.ai_url, { waitUntil: 'domcontentloaded' });
   await page.waitForTimeout(Number(input.bootstrap_delay_ms || 2000));
-  const result = await page.evaluate(async (payload) => {
-    const response = await fetch(payload.runURL, {
-      method: 'POST',
-      credentials: 'include',
-      headers: payload.headers,
-      body: JSON.stringify(payload.body),
-    });
-    return {
-      status: response.status,
-      content_type: response.headers.get('content-type') || '',
-      text: await response.text(),
-    };
-  }, {
-    runURL: input.run_url,
+  const result = await page.evaluate(browserFetchScript, {
+    run_url: input.run_url,
     headers: input.headers,
-    body: input.payload,
+    payload: input.payload,
+    idle_after_answer_ms: Number(input.idle_after_answer_ms || 5000),
   });
 
   process.stdout.write(JSON.stringify(result));
@@ -202,22 +290,24 @@ try {
   console.error(error && error.stack ? error.stack : String(error));
   process.exit(1);
 });
-`
+`, browserTransportFetchPageScript)
+}
 
 type browserTransportRequest struct {
-	OriginURL        string            `json:"origin_url"`
-	AIURL            string            `json:"ai_url"`
-	RunURL           string            `json:"run_url"`
-	Headers          map[string]string `json:"headers"`
-	Payload          map[string]any    `json:"payload"`
-	Cookies          []ProbeCookie     `json:"cookies"`
-	BrowserPath      string            `json:"browser_path,omitempty"`
-	UserAgent        string            `json:"user_agent,omitempty"`
-	Locale           string            `json:"locale,omitempty"`
-	TimezoneID       string            `json:"timezone_id,omitempty"`
-	BootstrapDelayMS int               `json:"bootstrap_delay_ms"`
-	ViewportWidth    int               `json:"viewport_width"`
-	ViewportHeight   int               `json:"viewport_height"`
+	OriginURL         string            `json:"origin_url"`
+	AIURL             string            `json:"ai_url"`
+	RunURL            string            `json:"run_url"`
+	Headers           map[string]string `json:"headers"`
+	Payload           map[string]any    `json:"payload"`
+	Cookies           []ProbeCookie     `json:"cookies"`
+	BrowserPath       string            `json:"browser_path,omitempty"`
+	UserAgent         string            `json:"user_agent,omitempty"`
+	Locale            string            `json:"locale,omitempty"`
+	TimezoneID        string            `json:"timezone_id,omitempty"`
+	BootstrapDelayMS  int               `json:"bootstrap_delay_ms"`
+	IdleAfterAnswerMS int               `json:"idle_after_answer_ms"`
+	ViewportWidth     int               `json:"viewport_width"`
+	ViewportHeight    int               `json:"viewport_height"`
 }
 
 type browserTransportResponse struct {
@@ -268,14 +358,14 @@ func runInferenceTranscriptInBrowser(ctx context.Context, client *NotionAIClient
 	if responseText, err := runInferenceTranscriptInBrowserWithPlaywright(ctx, client, payload); err == nil {
 		return responseText, nil
 	} else {
-		var unavailableErr *browserHelperUnavailableError
-		if !errors.As(err, &unavailableErr) {
-			return "", err
-		}
 		if responseText, chromedpErr := runInferenceTranscriptInBrowserWithChromedp(ctx, client, payload); chromedpErr == nil {
 			return responseText, nil
 		} else {
-			return "", fmt.Errorf("playwright browser fallback unavailable (%v); chromedp fallback failed: %w", err, chromedpErr)
+			var unavailableErr *browserHelperUnavailableError
+			if errors.As(err, &unavailableErr) {
+				return "", fmt.Errorf("playwright browser fallback unavailable (%v); chromedp fallback failed: %w", err, chromedpErr)
+			}
+			return "", fmt.Errorf("playwright browser fallback failed: %v; chromedp fallback failed: %w", err, chromedpErr)
 		}
 	}
 }
@@ -319,7 +409,7 @@ func runInferenceTranscriptInBrowserWithPlaywright(ctx context.Context, client *
 func runInferenceTranscriptInBrowserWithPythonPlaywright(ctx context.Context, request browserTransportRequest) (string, error) {
 	var unavailableErr error
 	for _, runtimeName := range []string{"python", "python3"} {
-		responseText, err := runPlaywrightBrowserHelper(ctx, runtimeName, ".py", pythonPlaywrightBrowserHelperScript, request, nil)
+		responseText, err := runPlaywrightBrowserHelper(ctx, runtimeName, ".py", pythonPlaywrightBrowserHelperScript(), request, nil)
 		if err == nil {
 			return responseText, nil
 		}
@@ -337,7 +427,7 @@ func runInferenceTranscriptInBrowserWithPythonPlaywright(ctx context.Context, re
 }
 
 func runInferenceTranscriptInBrowserWithNodePlaywright(ctx context.Context, request browserTransportRequest) (string, error) {
-	return runPlaywrightBrowserHelper(ctx, "node", ".cjs", nodePlaywrightBrowserHelperScript, request, browserHelperNodeEnv())
+	return runPlaywrightBrowserHelper(ctx, "node", ".cjs", nodePlaywrightBrowserHelperScript(), request, browserHelperNodeEnv())
 }
 
 func runPlaywrightBrowserHelper(ctx context.Context, runtimeName string, extension string, script string, request browserTransportRequest, extraEnv []string) (string, error) {
@@ -420,20 +510,62 @@ func buildBrowserTransportRequest(client *NotionAIClient, payload map[string]any
 	headers := client.baseHeaders("application/x-ndjson", client.Config.NotionUpstream().AIURL())
 	delete(headers, "cookie")
 	return browserTransportRequest{
-		OriginURL:        originURL,
-		AIURL:            client.Config.NotionUpstream().AIURL(),
-		RunURL:           client.Config.NotionUpstream().API("runInferenceTranscript"),
-		Headers:          headers,
-		Payload:          payload,
-		Cookies:          client.Session.Cookies,
-		BrowserPath:      resolvePlaywrightBrowserExecutablePath(),
-		UserAgent:        strings.TrimSpace(headers["user-agent"]),
-		Locale:           strings.TrimSpace(headers["accept-language"]),
-		TimezoneID:       "Asia/Shanghai",
-		BootstrapDelayMS: int(browserTransportBootstrapDelay / time.Millisecond),
-		ViewportWidth:    browserTransportViewportWidth,
-		ViewportHeight:   browserTransportViewportHeight,
+		OriginURL:         originURL,
+		AIURL:             client.Config.NotionUpstream().AIURL(),
+		RunURL:            client.Config.NotionUpstream().API("runInferenceTranscript"),
+		Headers:           headers,
+		Payload:           payload,
+		Cookies:           client.Session.Cookies,
+		BrowserPath:       resolvePlaywrightBrowserExecutablePath(),
+		UserAgent:         strings.TrimSpace(headers["user-agent"]),
+		Locale:            normalizeBrowserTransportLocale(client.acceptLanguageHeader()),
+		TimezoneID:        "Asia/Shanghai",
+		BootstrapDelayMS:  int(browserTransportBootstrapDelay / time.Millisecond),
+		IdleAfterAnswerMS: int(ndjsonIdleAfterAnswerTimeout / time.Millisecond),
+		ViewportWidth:     browserTransportViewportWidth,
+		ViewportHeight:    browserTransportViewportHeight,
 	}, nil
+}
+
+func normalizeBrowserTransportLocale(value string) string {
+	clean := strings.TrimSpace(value)
+	if clean == "" {
+		return ""
+	}
+	if idx := strings.Index(clean, ","); idx >= 0 {
+		clean = clean[:idx]
+	}
+	if idx := strings.Index(clean, ";"); idx >= 0 {
+		clean = clean[:idx]
+	}
+	clean = strings.ReplaceAll(strings.TrimSpace(clean), "_", "-")
+	if clean == "" {
+		return ""
+	}
+	parts := strings.Split(clean, "-")
+	if len(parts) == 0 {
+		return ""
+	}
+	primary := strings.ToLower(strings.TrimSpace(parts[0]))
+	if len(primary) < 2 || len(primary) > 8 {
+		return ""
+	}
+	normalized := []string{primary}
+	for _, part := range parts[1:] {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		switch {
+		case len(part) == 2:
+			normalized = append(normalized, strings.ToUpper(part))
+		case len(part) == 4:
+			normalized = append(normalized, strings.ToUpper(part[:1])+strings.ToLower(part[1:]))
+		default:
+			normalized = append(normalized, strings.ToUpper(part))
+		}
+	}
+	return strings.Join(normalized, "-")
 }
 
 func browserHelperNodeEnv() []string {
@@ -507,43 +639,32 @@ func runInferenceTranscriptInBrowserWithChromedp(ctx context.Context, client *No
 		originURL = "https://www.notion.so"
 	}
 	aiURL := client.Config.NotionUpstream().AIURL()
-	runURL := client.Config.NotionUpstream().API("runInferenceTranscript")
 
-	headersPayload, err := json.Marshal(client.browserFetchHeaders())
+	request, err := buildBrowserTransportRequest(client, payload)
 	if err != nil {
 		return "", err
 	}
-	bodyPayload, err := json.Marshal(payload)
+	inputPayload, err := json.Marshal(request)
 	if err != nil {
 		return "", err
 	}
-	expression := fmt.Sprintf(`(async () => {
-  const headers = %s;
-  const payload = %s;
-  const response = await fetch(%q, {
-    method: "POST",
-    credentials: "include",
-    headers,
-    body: JSON.stringify(payload),
-  });
-  return await response.text();
-})()`, string(headersPayload), string(bodyPayload), runURL)
+	expression := fmt.Sprintf("(%s)(%s)", browserTransportFetchPageScript, string(inputPayload))
 
-	var responseText string
+	var response browserTransportResponse
 	if err := chromedp.Run(browserCtx,
 		network.Enable(),
 		setBrowserSessionCookies(originURL, client.Session.Cookies),
 		chromedp.Navigate(aiURL),
 		chromedp.WaitReady("body", chromedp.ByQuery),
 		chromedp.Sleep(browserTransportBootstrapDelay),
-		chromedp.Evaluate(expression, &responseText),
+		chromedp.Evaluate(expression, &response),
 	); err != nil {
 		return "", err
 	}
-	if strings.TrimSpace(responseText) == "" {
+	if strings.TrimSpace(response.Text) == "" {
 		return "", fmt.Errorf("browser transport returned empty response")
 	}
-	return responseText, nil
+	return response.Text, nil
 }
 
 func (c *NotionAIClient) supportsBrowserRunInferenceFallback() bool {
@@ -570,18 +691,6 @@ func (c *NotionAIClient) supportsBrowserRunInferenceFallback() bool {
 		return false
 	}
 	return true
-}
-
-func (c *NotionAIClient) browserFetchHeaders() map[string]string {
-	return map[string]string{
-		"accept":                      "application/x-ndjson",
-		"accept-language":             c.acceptLanguageHeader(),
-		"content-type":                "application/json",
-		"notion-audit-log-platform":   "web",
-		"notion-client-version":       strings.TrimSpace(c.Session.ClientVersion),
-		"x-notion-active-user-header": strings.TrimSpace(c.Session.UserID),
-		"x-notion-space-id":           strings.TrimSpace(c.Session.SpaceID),
-	}
 }
 
 func setBrowserSessionCookies(originURL string, cookies []ProbeCookie) chromedp.Action {

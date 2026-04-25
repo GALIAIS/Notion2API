@@ -83,9 +83,6 @@ func resolveResinForwardProxyURL(policy ProxyPolicy, email string, cfg AppConfig
 	if err != nil {
 		return nil, "", err
 	}
-	if token == "" {
-		return nil, "", fmt.Errorf("resin token missing")
-	}
 	platform := strings.TrimSpace(policy.Resin.Platform)
 	if platform == "" {
 		platform = "Default"
@@ -94,9 +91,11 @@ func resolveResinForwardProxyURL(policy ProxyPolicy, email string, cfg AppConfig
 	if stickyAccount == "" {
 		stickyAccount = "account"
 	}
-	username := fmt.Sprintf("%s.%s", platform, stickyAccount)
 	proxyURL := *baseURL
-	proxyURL.User = url.UserPassword(username, token)
+	if strings.TrimSpace(token) != "" {
+		username := fmt.Sprintf("%s.%s", platform, stickyAccount)
+		proxyURL.User = url.UserPassword(username, token)
+	}
 	return &proxyURL, stickyAccount, nil
 }
 

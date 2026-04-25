@@ -32,6 +32,9 @@ frontend/node_modules/
 frontend/.next/
 frontend/out/
 *.tsbuildinfo
+.omc/
+.spec-workflow/
+docs/superpowers/
 
 # Local test sources stay out of git
 *_test.go
@@ -41,3 +44,4 @@ frontend/out/
 *.spec.tsx
 __tests__/
 WEBUI_DEVELOPMENT_GUIDE.md
+CLAUDE.md

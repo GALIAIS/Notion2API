@@ -1,0 +1,6 @@
+version: "1"
+rules:
+  - base: main
+    upstream: GALIAIS:main # change `wei` to the owner of upstream repo
+    mergeMethod: merge
+    mergeUnstable: true

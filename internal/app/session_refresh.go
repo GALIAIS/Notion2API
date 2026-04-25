@@ -80,7 +80,8 @@ func loadSessionInfoForAccountRefresh(cfg AppConfig, account NotionAccount) (Ses
 
 func buildRefreshedSession(ctx context.Context, cfg AppConfig, account NotionAccount, prior SessionInfo) (SessionInfo, error) {
 	upstream := cfg.NotionUpstream()
-	client, err := newNotionLoginHTTPClient(helperTimeout(cfg), upstream)
+	resolver := NewProxyResolver(cfg)
+	client, err := newNotionLoginHTTPClient(helperTimeout(cfg), upstream, resolver, account.Email)
 	if err != nil {
 		return SessionInfo{}, err
 	}

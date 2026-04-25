@@ -204,7 +204,7 @@ func (s *ServerState) ApplyConfig(cfg AppConfig) error {
 			log.Printf("[startup] session bootstrap skipped for probe=%s active=%s: %v", probePath, activeEmail, err)
 		} else {
 			session = loadedSession
-			client = newNotionAIClient(loadedSession, cfg)
+			client = newNotionAIClient(loadedSession, cfg, activeEmail)
 			if activeEmail != "" {
 				cfg.ProbeJSON = loadedSession.ProbePath
 			}

@@ -29,6 +29,7 @@ type LoginStartRequest struct {
 	ProfileDir       string
 	PendingPath      string
 	StorageStatePath string
+	AccountEmail     string
 }
 
 type LoginVerifyRequest struct {
@@ -38,6 +39,7 @@ type LoginVerifyRequest struct {
 	PendingPath      string
 	StorageStatePath string
 	ProbePath        string
+	AccountEmail     string
 }
 
 type loginStorageState struct {
@@ -162,7 +164,7 @@ func writeLoginStorageState(path string, payload loginStorageState) error {
 	return writePrettyJSONFile(path, payload)
 }
 
-func newNotionLoginHTTPClient(timeout time.Duration, upstream NotionUpstream) (*http.Client, error) {
+func newNotionLoginHTTPClient(timeout time.Duration, upstream NotionUpstream, resolver *ProxyResolver, accountEmail string) (*http.Client, error) {
 	jar, err := cookiejar.New(nil)
 	if err != nil {
 		return nil, err
@@ -171,12 +173,27 @@ func newNotionLoginHTTPClient(timeout time.Duration, upstream NotionUpstream) (*
 	if strings.TrimSpace(upstream.TLSServerName) != "" {
 		tlsConfig.ServerName = strings.TrimSpace(upstream.TLSServerName)
 	}
+	proxyFunc := upstream.ProxyFunc()
 	return &http.Client{
 		Timeout: timeout,
 		Jar:     jar,
 		Transport: &http.Transport{
 			TLSClientConfig: tlsConfig,
-			Proxy:           upstream.ProxyFunc(),
+			Proxy: func(req *http.Request) (*url.URL, error) {
+				if resolver != nil {
+					proxyURL, _, resolveErr := resolver.ResolveProxyForRequest(accountEmail, req.URL)
+					if resolveErr != nil {
+						return nil, resolveErr
+					}
+					if proxyURL != nil {
+						return proxyURL, nil
+					}
+				}
+				if proxyFunc == nil {
+					return nil, nil
+				}
+				return proxyFunc(req)
+			},
 		},
 	}, nil
 }
@@ -628,8 +645,9 @@ func StartEmailLogin(ctx context.Context, cfg AppConfig, req LoginStartRequest) 
 	ctx, cancel := helperContext(ctx, cfg)
 	defer cancel()
 	upstream := cfg.NotionUpstream()
+	resolver := NewProxyResolver(cfg)
 
-	client, err := newNotionLoginHTTPClient(helperTimeout(cfg), upstream)
+	client, err := newNotionLoginHTTPClient(helperTimeout(cfg), upstream, resolver, firstNonEmpty(req.AccountEmail, req.Email))
 	if err != nil {
 		return failLoginState(req.PendingPath, state, err)
 	}
@@ -696,8 +714,9 @@ func VerifyEmailLogin(ctx context.Context, cfg AppConfig, req LoginVerifyRequest
 	ctx, cancel := helperContext(ctx, cfg)
 	defer cancel()
 	upstream := cfg.NotionUpstream()
+	resolver := NewProxyResolver(cfg)
 
-	client, err := newNotionLoginHTTPClient(helperTimeout(cfg), upstream)
+	client, err := newNotionLoginHTTPClient(helperTimeout(cfg), upstream, resolver, firstNonEmpty(req.AccountEmail, req.Email))
 	if err != nil {
 		return failLoginState(req.PendingPath, pending, err)
 	}

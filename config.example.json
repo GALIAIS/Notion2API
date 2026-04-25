@@ -1,13 +1,24 @@
 {
-  "probe_json": "C:\\Users\\GALIAIS\\AppData\\Local\\Temp\\TestAdminAccountManualImportCreatesSessionFiles722969220\\001\\manual_example_com\\probe.json",
+  "probe_json": "probe_files/default/probe.json",
   "host": "127.0.0.1",
-  "port": 8791,
-  "api_key": "notion2api-local-key",
+  "port": 8787,
+  "api_key": "change-me-openai-key",
   "upstream_base_url": "https://www.notion.so",
   "upstream_origin": "https://www.notion.so",
+  "upstream_host_header": "",
+  "upstream_tls_server_name": "",
+  "upstream_use_env_proxy": false,
+  "proxy_mode": "off",
+  "proxy_url": "",
+  "proxy_http_url": "",
+  "proxy_https_url": "",
+  "resin_enabled": false,
+  "resin_url": "",
+  "resin_platform": "Default",
+  "resin_mode": "forward",
   "model_id": "auto",
   "default_model": "auto",
-  "active_account": "manual@example.com",
+  "active_account": "",
   "timeout_sec": 180,
   "poll_interval_sec": 1.5,
   "poll_max_rounds": 40,
@@ -60,24 +71,35 @@
   },
   "accounts": [
     {
-      "email": "manual@example.com",
-      "probe_json": "C:\\Users\\GALIAIS\\AppData\\Local\\Temp\\TestAdminAccountManualImportCreatesSessionFiles722969220\\001\\manual_example_com\\probe.json",
-      "profile_dir": "C:\\Users\\GALIAIS\\AppData\\Local\\Temp\\TestAdminAccountManualImportCreatesSessionFiles722969220\\001\\manual_example_com",
-      "storage_state_path": "C:\\Users\\GALIAIS\\AppData\\Local\\Temp\\TestAdminAccountManualImportCreatesSessionFiles722969220\\001\\manual_example_com\\storage_state.json",
-      "pending_state_path": "C:\\Users\\GALIAIS\\AppData\\Local\\Temp\\TestAdminAccountManualImportCreatesSessionFiles722969220\\001\\manual_example_com\\pending_login.json",
-      "user_id": "user-1",
-      "user_name": "manual",
-      "space_id": "space-1",
-      "space_name": "manual's Space",
-      "client_version": "23.13.test",
-      "status": "expired",
-      "last_error": "open C:\\Users\\GALIAIS\\AppData\\Local\\Temp\\TestAdminAccountManualImportCreatesSessionFiles722969220\\001\\manual_example_com\\probe.json: The system cannot find the path specified.",
-      "last_login_at": "2026-03-22T14:30:44+08:00"
+      "email": "alice@example.com",
+      "probe_json": "probe_files/notion_accounts/alice_example_com/probe.json",
+      "profile_dir": "probe_files/notion_accounts/alice_example_com",
+      "storage_state_path": "probe_files/notion_accounts/alice_example_com/storage_state.json",
+      "pending_state_path": "probe_files/notion_accounts/alice_example_com/pending_login.json",
+      "proxy_mode": "resin_forward",
+      "sticky_proxy_account": "alice",
+      "resin_enabled": true,
+      "resin_url": "http://127.0.0.1:2260/your-resin-token",
+      "resin_platform": "Default",
+      "resin_mode": "forward",
+      "priority": 100,
+      "disabled": false
+    },
+    {
+      "email": "bob@example.com",
+      "probe_json": "probe_files/notion_accounts/bob_example_com/probe.json",
+      "profile_dir": "probe_files/notion_accounts/bob_example_com",
+      "storage_state_path": "probe_files/notion_accounts/bob_example_com/storage_state.json",
+      "pending_state_path": "probe_files/notion_accounts/bob_example_com/pending_login.json",
+      "proxy_mode": "socks5",
+      "proxy_url": "socks5://127.0.0.1:1080",
+      "priority": 50,
+      "disabled": false
     }
   ],
   "model_aliases": {
-    "gpt52": "gpt-5.2",
-    "gpt54": "gpt-5.4"
+    "gpt54": "gpt-5.4",
+    "gpt52": "gpt-5.2"
   }
 }
 

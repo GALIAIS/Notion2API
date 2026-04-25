@@ -28,7 +28,7 @@ func newProtocolTestClient(cfg AppConfig) *NotionAIClient {
 			Name:  "token_v2",
 			Value: "test-cookie",
 		}},
-	}, cfg)
+	}, cfg, "")
 }
 
 func transcriptStepValue(t *testing.T, payload map[string]any, stepType string) map[string]any {
@@ -171,5 +171,49 @@ func TestSaveContinuationScaffoldOmitsUnretryableErrorBehavior(t *testing.T) {
 	}
 	if _, exists := gotBody["unretryable_error_behavior"]; exists {
 		t.Fatalf("expected saveTransactionsFanout payload to omit unretryable_error_behavior")
+	}
+}
+
+func TestPostJSONResponseAddsResinAccountHeaderWhenEnabled(t *testing.T) {
+	capturedHeader := ""
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedHeader = r.Header.Get(defaultResinAccountHeader)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}))
+	defer server.Close()
+
+	cfg := defaultConfig()
+	cfg.UpstreamBaseURL = server.URL
+	cfg.UpstreamOrigin = server.URL
+	cfg.ProxyMode = proxyModeResinForward
+	cfg.ResinEnabled = true
+	cfg.ResinURL = "http://127.0.0.1:2260/my-token"
+	cfg.ResinPlatform = "Default"
+	cfg.Accounts = []NotionAccount{{
+		Email:              "alice@example.com",
+		StickyProxyAccount: "alice",
+	}}
+
+	client := newNotionAIClientWithMode(SessionInfo{
+		ClientVersion: "test-client-version",
+		UserID:        "test-user",
+		SpaceID:       "test-space",
+		Cookies: []ProbeCookie{{
+			Name:  "token_v2",
+			Value: "test-cookie",
+		}},
+	}, cfg, "alice@example.com", false)
+	client.HTTPClient.Transport = &http.Transport{}
+	client.AccountEmail = "alice@example.com"
+
+	if _, err := client.postJSONResponse(context.Background(), server.URL+"/api/v3/markInferenceTranscriptSeen", map[string]any{
+		"threadId": "thread-test",
+		"spaceId":  "test-space",
+	}, "application/json"); err != nil {
+		t.Fatalf("postJSONResponse failed: %v", err)
+	}
+	if got, want := capturedHeader, "alice"; got != want {
+		t.Fatalf("%s = %q, want %q", defaultResinAccountHeader, got, want)
 	}
 }

@@ -158,14 +158,15 @@ func fetchAvailableModelsMetadata(ctx context.Context, client *http.Client, upst
 	return parseProbeModelsBlob(string(raw)), nil
 }
 
-func discoverImportedAccountMetadata(ctx context.Context, cfg AppConfig, cookies []ProbeCookie, fallback discoveredAccountMetadata) (discoveredAccountMetadata, error) {
+func discoverImportedAccountMetadata(ctx context.Context, cfg AppConfig, accountEmail string, cookies []ProbeCookie, fallback discoveredAccountMetadata) (discoveredAccountMetadata, error) {
 	meta := fallback
 	cookies = normalizeProbeCookies(cookies)
 	if len(cookies) == 0 {
 		return meta, fmt.Errorf("cookies are required for auto-discovery")
 	}
 	upstream := cfg.NotionUpstream()
-	client, err := newNotionLoginHTTPClient(helperTimeout(cfg), upstream)
+	resolver := NewProxyResolver(cfg)
+	client, err := newNotionLoginHTTPClient(helperTimeout(cfg), upstream, resolver, accountEmail)
 	if err != nil {
 		return meta, err
 	}

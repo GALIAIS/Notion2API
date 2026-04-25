@@ -1092,7 +1092,7 @@ func (a *App) notionClientForAccount(ctx context.Context, accountEmail string) (
 				}
 				return nil, fmt.Errorf("load account session for %s: %w", email, err)
 			}
-			return newNotionAIClient(session, cfg), nil
+			return newNotionAIClient(session, cfg, email), nil
 		}
 	}
 	if fallbackClient != nil {
@@ -1102,7 +1102,7 @@ func (a *App) notionClientForAccount(ctx context.Context, accountEmail string) (
 	if err != nil {
 		return nil, err
 	}
-	return newNotionAIClient(session, cfg), nil
+	return newNotionAIClient(session, cfg, ""), nil
 }
 
 func (a *App) deleteConversation(conversationID string) error {

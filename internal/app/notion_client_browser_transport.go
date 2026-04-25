@@ -596,12 +596,25 @@ func buildBrowserTransportRequest(client *NotionAIClient, payload map[string]any
 	if originURL == "" {
 		originURL = "https://www.notion.so"
 	}
+	runURL := client.Config.NotionUpstream().API("runInferenceTranscript")
 	headers := client.baseHeaders("application/x-ndjson", client.Config.NotionUpstream().AIURL())
 	delete(headers, "cookie")
+	if client.ProxyResolver != nil {
+		if parsedRunURL, err := url.Parse(runURL); err == nil {
+			if _, extraHeaders, resolveErr := client.ProxyResolver.ResolveProxyForRequest(client.AccountEmail, parsedRunURL); resolveErr == nil {
+				for key, value := range extraHeaders {
+					if strings.TrimSpace(key) == "" || strings.TrimSpace(value) == "" {
+						continue
+					}
+					headers[key] = value
+				}
+			}
+		}
+	}
 	return browserTransportRequest{
 		OriginURL:         originURL,
 		AIURL:             client.Config.NotionUpstream().AIURL(),
-		RunURL:            client.Config.NotionUpstream().API("runInferenceTranscript"),
+		RunURL:            runURL,
 		Headers:           headers,
 		Payload:           payload,
 		Cookies:           client.Session.Cookies,

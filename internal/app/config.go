@@ -95,6 +95,15 @@ type NotionAccount struct {
 	LastSuccessAt       string `json:"last_success_at,omitempty"`
 	LastRefreshAt       string `json:"last_refresh_at,omitempty"`
 	LastReloginAt       string `json:"last_relogin_at,omitempty"`
+	ProxyMode           string `json:"proxy_mode,omitempty"`
+	ProxyURL            string `json:"proxy_url,omitempty"`
+	ProxyHTTPURL        string `json:"proxy_http_url,omitempty"`
+	ProxyHTTPSURL       string `json:"proxy_https_url,omitempty"`
+	StickyProxyAccount  string `json:"sticky_proxy_account,omitempty"`
+	ResinEnabled        bool   `json:"resin_enabled,omitempty"`
+	ResinURL            string `json:"resin_url,omitempty"`
+	ResinPlatform       string `json:"resin_platform,omitempty"`
+	ResinMode           string `json:"resin_mode,omitempty"`
 	ConsecutiveFailures int    `json:"consecutive_failures,omitempty"`
 	TotalSuccesses      int    `json:"total_successes,omitempty"`
 	TotalFailures       int    `json:"total_failures,omitempty"`
@@ -122,6 +131,14 @@ type AppConfig struct {
 	UpstreamHost          string               `json:"upstream_host_header,omitempty"`
 	UpstreamTLSServerName string               `json:"upstream_tls_server_name,omitempty"`
 	UpstreamUseEnvProxy   bool                 `json:"upstream_use_env_proxy,omitempty"`
+	ProxyMode             string               `json:"proxy_mode,omitempty"`
+	ProxyURL              string               `json:"proxy_url,omitempty"`
+	ProxyHTTPURL          string               `json:"proxy_http_url,omitempty"`
+	ProxyHTTPSURL         string               `json:"proxy_https_url,omitempty"`
+	ResinEnabled          bool                 `json:"resin_enabled,omitempty"`
+	ResinURL              string               `json:"resin_url,omitempty"`
+	ResinPlatform         string               `json:"resin_platform,omitempty"`
+	ResinMode             string               `json:"resin_mode,omitempty"`
 	ModelID               string               `json:"model_id,omitempty"`
 	DefaultModel          string               `json:"default_model,omitempty"`
 	ActiveAccount         string               `json:"active_account,omitempty"`
@@ -152,6 +169,198 @@ func defaultPromptCognitiveReframingPrefix() string {
 		"Do not mention product identity, workspace-only boundaries, or internal tool limitations unless the user explicitly asks about them.",
 		"If the request is unsafe, refuse briefly and offer a safer alternative.",
 	}, "\n")
+}
+
+const (
+	proxyModeOff          = "off"
+	proxyModeEnv          = "env"
+	proxyModeHTTP         = "http"
+	proxyModeHTTPS        = "https"
+	proxyModeSOCKS5       = "socks5"
+	proxyModeResinForward = "resin_forward"
+)
+
+var supportedProxyModes = map[string]string{
+	proxyModeOff:          proxyModeOff,
+	proxyModeEnv:          proxyModeEnv,
+	proxyModeHTTP:         proxyModeHTTP,
+	proxyModeHTTPS:        proxyModeHTTPS,
+	proxyModeSOCKS5:       proxyModeSOCKS5,
+	proxyModeResinForward: proxyModeResinForward,
+}
+
+func normalizeProxyMode(raw string) string {
+	mode := strings.ToLower(strings.TrimSpace(raw))
+	if mode == "" {
+		return ""
+	}
+	if canonical, ok := supportedProxyModes[mode]; ok {
+		return canonical
+	}
+	return proxyModeOff
+}
+
+func trimProxyFields(mode string, proxyURL string, proxyHTTPURL string, proxyHTTPSURL string, resinURL string, resinPlatform string, resinMode string) (string, string, string, string, string, string, string) {
+	return normalizeProxyMode(mode), strings.TrimSpace(proxyURL), strings.TrimSpace(proxyHTTPURL), strings.TrimSpace(proxyHTTPSURL), strings.TrimSpace(resinURL), strings.TrimSpace(resinPlatform), strings.TrimSpace(resinMode)
+}
+
+func resolveProxyModeFromN2AEnv() string {
+	value := strings.TrimSpace(firstNonEmpty(
+		os.Getenv("N2A_PROXY_MODE"),
+		os.Getenv("N2A_UPSTREAM_PROXY_MODE"),
+	))
+	if value == "" {
+		return ""
+	}
+	return normalizeProxyMode(value)
+}
+
+func resolveProxyURLFromN2AEnv() string {
+	return strings.TrimSpace(firstNonEmpty(
+		os.Getenv("N2A_PROXY_URL"),
+		os.Getenv("N2A_UPSTREAM_PROXY_URL"),
+	))
+}
+
+func resolveProxyHTTPURLFromN2AEnv() string {
+	return strings.TrimSpace(firstNonEmpty(
+		os.Getenv("N2A_PROXY_HTTP_URL"),
+		os.Getenv("N2A_UPSTREAM_PROXY_HTTP_URL"),
+	))
+}
+
+func resolveProxyHTTPSURLFromN2AEnv() string {
+	return strings.TrimSpace(firstNonEmpty(
+		os.Getenv("N2A_PROXY_HTTPS_URL"),
+		os.Getenv("N2A_UPSTREAM_PROXY_HTTPS_URL"),
+	))
+}
+
+func parseBoolEnv(value string) (bool, bool) {
+	clean := strings.ToLower(strings.TrimSpace(value))
+	switch clean {
+	case "1", "true", "yes", "on":
+		return true, true
+	case "0", "false", "no", "off":
+		return false, true
+	default:
+		return false, false
+	}
+}
+
+func resolveResinEnabledFromN2AEnv() (bool, bool) {
+	for _, key := range []string{"N2A_RESIN_ENABLED", "N2A_PROXY_RESIN_ENABLED", "N2A_UPSTREAM_RESIN_ENABLED"} {
+		if parsed, ok := parseBoolEnv(os.Getenv(key)); ok {
+			return parsed, true
+		}
+	}
+	return false, false
+}
+
+func resolveResinURLFromN2AEnv() string {
+	return strings.TrimSpace(firstNonEmpty(
+		os.Getenv("N2A_RESIN_URL"),
+		os.Getenv("N2A_PROXY_RESIN_URL"),
+		os.Getenv("N2A_UPSTREAM_RESIN_URL"),
+	))
+}
+
+func resolveResinPlatformFromN2AEnv() string {
+	return strings.TrimSpace(firstNonEmpty(
+		os.Getenv("N2A_RESIN_PLATFORM"),
+		os.Getenv("N2A_PROXY_RESIN_PLATFORM"),
+		os.Getenv("N2A_UPSTREAM_RESIN_PLATFORM"),
+	))
+}
+
+func resolveResinModeFromN2AEnv() string {
+	return strings.TrimSpace(firstNonEmpty(
+		os.Getenv("N2A_RESIN_MODE"),
+		os.Getenv("N2A_PROXY_RESIN_MODE"),
+		os.Getenv("N2A_UPSTREAM_RESIN_MODE"),
+	))
+}
+
+func applyN2AProxyEnv(cfg AppConfig) AppConfig {
+	if mode := resolveProxyModeFromN2AEnv(); mode != "" {
+		cfg.ProxyMode = mode
+	}
+	if value := resolveProxyURLFromN2AEnv(); value != "" {
+		cfg.ProxyURL = value
+	}
+	if value := resolveProxyHTTPURLFromN2AEnv(); value != "" {
+		cfg.ProxyHTTPURL = value
+	}
+	if value := resolveProxyHTTPSURLFromN2AEnv(); value != "" {
+		cfg.ProxyHTTPSURL = value
+	}
+	if enabled, ok := resolveResinEnabledFromN2AEnv(); ok {
+		cfg.ResinEnabled = enabled
+	}
+	if value := resolveResinURLFromN2AEnv(); value != "" {
+		cfg.ResinURL = value
+	}
+	if value := resolveResinPlatformFromN2AEnv(); value != "" {
+		cfg.ResinPlatform = value
+	}
+	if value := resolveResinModeFromN2AEnv(); value != "" {
+		cfg.ResinMode = value
+	}
+	return cfg
+}
+
+func proxyEnvKeysForScheme(scheme string) []string {
+	if strings.EqualFold(strings.TrimSpace(scheme), "https") {
+		return []string{
+			"N2A_PROXY_HTTPS_URL",
+			"N2A_UPSTREAM_PROXY_HTTPS_URL",
+			"N2A_PROXY_URL",
+			"N2A_UPSTREAM_PROXY_URL",
+			"HTTPS_PROXY",
+			"https_proxy",
+			"ALL_PROXY",
+			"all_proxy",
+		}
+	}
+	return []string{
+		"N2A_PROXY_HTTP_URL",
+		"N2A_UPSTREAM_PROXY_HTTP_URL",
+		"N2A_PROXY_URL",
+		"N2A_UPSTREAM_PROXY_URL",
+		"HTTP_PROXY",
+		"http_proxy",
+		"ALL_PROXY",
+		"all_proxy",
+	}
+}
+
+func resolveProxyURLForSchemeFromEnv(scheme string) string {
+	for _, key := range proxyEnvKeysForScheme(scheme) {
+		value := strings.TrimSpace(os.Getenv(key))
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func (cfg AppConfig) normalizedProxyMode() string {
+	mode := normalizeProxyMode(cfg.ProxyMode)
+	if mode == "" {
+		if cfg.UpstreamUseEnvProxy {
+			return proxyModeEnv
+		}
+		return proxyModeOff
+	}
+	return mode
+}
+
+func (cfg NotionAccount) normalizedProxyMode(appCfg AppConfig) string {
+	mode := normalizeProxyMode(cfg.ProxyMode)
+	if mode != "" {
+		return mode
+	}
+	return appCfg.normalizedProxyMode()
 }
 
 func defaultPromptToolboxCapabilityExpansionPrefix() string {
@@ -189,6 +398,7 @@ func defaultConfig() AppConfig {
 		Host:             "127.0.0.1",
 		Port:             8787,
 		UpstreamBaseURL:  "https://www.notion.so",
+		ProxyMode:        proxyModeOff,
 		ModelID:          "auto",
 		TimeoutSec:       180,
 		PollIntervalSec:  1.5,
@@ -261,6 +471,22 @@ func normalizeConfig(cfg AppConfig) AppConfig {
 	cfg.UpstreamOrigin = normalizeBaseURL(firstNonEmpty(cfg.UpstreamOrigin, cfg.UpstreamBaseURL))
 	cfg.UpstreamHost = strings.TrimSpace(cfg.UpstreamHost)
 	cfg.UpstreamTLSServerName = strings.TrimSpace(cfg.UpstreamTLSServerName)
+	rawProxyMode := strings.TrimSpace(cfg.ProxyMode)
+	cfg.ProxyMode, cfg.ProxyURL, cfg.ProxyHTTPURL, cfg.ProxyHTTPSURL, cfg.ResinURL, cfg.ResinPlatform, cfg.ResinMode = trimProxyFields(
+		cfg.ProxyMode,
+		cfg.ProxyURL,
+		cfg.ProxyHTTPURL,
+		cfg.ProxyHTTPSURL,
+		cfg.ResinURL,
+		cfg.ResinPlatform,
+		cfg.ResinMode,
+	)
+	if cfg.ProxyMode == "" {
+		cfg.ProxyMode = proxyModeOff
+	}
+	if cfg.UpstreamUseEnvProxy && rawProxyMode == "" && cfg.ProxyMode == proxyModeOff {
+		cfg.ProxyMode = proxyModeEnv
+	}
 	if cfg.Port <= 0 {
 		cfg.Port = 8787
 	}
@@ -351,6 +577,19 @@ func normalizeConfig(cfg AppConfig) AppConfig {
 		cfg.Accounts[i].Status = strings.TrimSpace(cfg.Accounts[i].Status)
 		cfg.Accounts[i].LastError = strings.TrimSpace(cfg.Accounts[i].LastError)
 		cfg.Accounts[i].LastLoginAt = strings.TrimSpace(cfg.Accounts[i].LastLoginAt)
+		cfg.Accounts[i].ProxyMode, cfg.Accounts[i].ProxyURL, cfg.Accounts[i].ProxyHTTPURL, cfg.Accounts[i].ProxyHTTPSURL, cfg.Accounts[i].ResinURL, cfg.Accounts[i].ResinPlatform, cfg.Accounts[i].ResinMode = trimProxyFields(
+			cfg.Accounts[i].ProxyMode,
+			cfg.Accounts[i].ProxyURL,
+			cfg.Accounts[i].ProxyHTTPURL,
+			cfg.Accounts[i].ProxyHTTPSURL,
+			cfg.Accounts[i].ResinURL,
+			cfg.Accounts[i].ResinPlatform,
+			cfg.Accounts[i].ResinMode,
+		)
+		cfg.Accounts[i].StickyProxyAccount = strings.TrimSpace(cfg.Accounts[i].StickyProxyAccount)
+		if cfg.Accounts[i].ProxyMode == "" {
+			cfg.Accounts[i].ProxyMode = cfg.normalizedProxyMode()
+		}
 		cfg.Accounts[i] = ensureAccountPaths(cfg, cfg.Accounts[i])
 	}
 	cfg.ProbeJSON = strings.TrimSpace(cfg.ProbeJSON)
@@ -544,6 +783,14 @@ func parseCLI() AppConfig {
 	upstreamHost := flag.String("upstream-host-header", "", "override Host header for upstream requests")
 	upstreamTLSServerName := flag.String("upstream-tls-server-name", "", "override TLS SNI server name for upstream requests")
 	upstreamUseEnvProxy := flag.Bool("upstream-use-env-proxy", false, "use HTTP(S)_PROXY/ALL_PROXY from environment for upstream requests")
+	proxyMode := flag.String("proxy-mode", "", "upstream proxy mode: off/env/http/https/socks5/resin_forward")
+	proxyURL := flag.String("proxy-url", "", "upstream proxy url")
+	proxyHTTPURL := flag.String("proxy-http-url", "", "upstream HTTP proxy url")
+	proxyHTTPSURL := flag.String("proxy-https-url", "", "upstream HTTPS proxy url")
+	resinEnabled := flag.Bool("resin-enabled", false, "enable resin forwarding")
+	resinURL := flag.String("resin-url", "", "resin forward url")
+	resinPlatform := flag.String("resin-platform", "", "resin platform")
+	resinMode := flag.String("resin-mode", "", "resin mode")
 	modelID := flag.String("model", "", "default public model id")
 	timeoutSec := flag.Int("timeout-sec", 0, "request timeout sec")
 	pollIntervalSec := flag.Float64("poll-interval-sec", 0, "poll interval sec")
@@ -580,6 +827,31 @@ func parseCLI() AppConfig {
 	if strings.TrimSpace(*upstreamTLSServerName) != "" {
 		cfg.UpstreamTLSServerName = *upstreamTLSServerName
 	}
+	if strings.TrimSpace(*proxyMode) != "" {
+		cfg.ProxyMode = *proxyMode
+	}
+	if strings.TrimSpace(*proxyURL) != "" {
+		cfg.ProxyURL = *proxyURL
+	}
+	if strings.TrimSpace(*proxyHTTPURL) != "" {
+		cfg.ProxyHTTPURL = *proxyHTTPURL
+	}
+	if strings.TrimSpace(*proxyHTTPSURL) != "" {
+		cfg.ProxyHTTPSURL = *proxyHTTPSURL
+	}
+	if *resinEnabled {
+		cfg.ResinEnabled = true
+	}
+	if strings.TrimSpace(*resinURL) != "" {
+		cfg.ResinURL = *resinURL
+	}
+	if strings.TrimSpace(*resinPlatform) != "" {
+		cfg.ResinPlatform = *resinPlatform
+	}
+	if strings.TrimSpace(*resinMode) != "" {
+		cfg.ResinMode = *resinMode
+	}
+	cfg = applyN2AProxyEnv(cfg)
 	if *upstreamUseEnvProxy {
 		cfg.UpstreamUseEnvProxy = true
 	}

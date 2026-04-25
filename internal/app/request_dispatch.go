@@ -122,7 +122,7 @@ func (a *App) probeAccountProtocolHealth(ctx context.Context, cfg AppConfig, ses
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, dispatchProtocolProbeTimeout(cfg))
 	defer cancel()
-	client := newNotionAIClient(session, cfg)
+	client := newNotionAIClient(session, cfg, "")
 	_, err := client.listInferenceTranscripts(probeCtx)
 	if isDispatchContextAbort(probeCtx, err) {
 		return nil
@@ -188,7 +188,7 @@ func (a *App) runPromptActiveFallback(r *http.Request, request PromptRunRequest,
 		return onDelta(delta)
 	}
 
-	result, err := a.runPromptWithSession(ctx, cfg, session, request, wrappedDelta)
+	result, err := a.runPromptWithSession(ctx, cfg, session, "", request, wrappedDelta)
 	if err == nil {
 		return result, nil
 	}
@@ -199,7 +199,7 @@ func (a *App) runPromptActiveFallback(r *http.Request, request PromptRunRequest,
 				if probeErr := a.probeAccountProtocolHealth(ctx, cfg, refreshed); probeErr != nil {
 					return InferenceResult{}, probeErr
 				}
-				return a.runPromptWithSession(ctx, cfg, refreshed, request, wrappedDelta)
+				return a.runPromptWithSession(ctx, cfg, refreshed, "", request, wrappedDelta)
 			}
 		}
 	}
@@ -240,7 +240,7 @@ func (a *App) runPromptActiveFallbackWithSink(r *http.Request, request PromptRun
 		return sink.EmitKeepAlive()
 	}
 
-	result, err := a.runPromptWithSessionWithSink(ctx, cfg, session, request, InferenceStreamSink{
+	result, err := a.runPromptWithSessionWithSink(ctx, cfg, session, "", request, InferenceStreamSink{
 		Text:            wrappedText,
 		Reasoning:       wrappedReasoning,
 		ReasoningWarmup: wrappedReasoningWarmup,
@@ -256,7 +256,7 @@ func (a *App) runPromptActiveFallbackWithSink(r *http.Request, request PromptRun
 				if probeErr := a.probeAccountProtocolHealth(ctx, cfg, refreshed); probeErr != nil {
 					return InferenceResult{}, probeErr
 				}
-				return a.runPromptWithSessionWithSink(ctx, cfg, refreshed, request, InferenceStreamSink{
+				return a.runPromptWithSessionWithSink(ctx, cfg, refreshed, "", request, InferenceStreamSink{
 					Text:            wrappedText,
 					Reasoning:       wrappedReasoning,
 					ReasoningWarmup: wrappedReasoningWarmup,
@@ -303,7 +303,7 @@ func (a *App) runPromptWithAccountPool(r *http.Request, request PromptRunRequest
 		account := markAccountDispatchStart(original, time.Now())
 		session, err := a.loadReadyDispatchSession(ctx, cfg, account)
 		if err == nil {
-			result, runErr := a.runPromptWithSession(ctx, cfg, session, request, wrappedDelta)
+			result, runErr := a.runPromptWithSession(ctx, cfg, session, account.Email, request, wrappedDelta)
 			if runErr == nil {
 				result.AccountEmail = account.Email
 				account.UserID = firstNonEmpty(session.UserID, account.UserID)
@@ -335,7 +335,7 @@ func (a *App) runPromptWithAccountPool(r *http.Request, request PromptRunRequest
 					if ok {
 						refreshedSession, loadErr := a.loadReadyDispatchSession(ctx, cfg, refreshedAccount)
 						if loadErr == nil {
-							result, retryErr := a.runPromptWithSession(ctx, cfg, refreshedSession, request, wrappedDelta)
+							result, retryErr := a.runPromptWithSession(ctx, cfg, refreshedSession, refreshedAccount.Email, request, wrappedDelta)
 							if retryErr == nil {
 								result.AccountEmail = refreshedAccount.Email
 								refreshedAccount.UserID = firstNonEmpty(refreshedSession.UserID, refreshedAccount.UserID)
@@ -432,7 +432,7 @@ func (a *App) runPromptWithAccountPoolWithSink(r *http.Request, request PromptRu
 		account := markAccountDispatchStart(original, time.Now())
 		session, err := a.loadReadyDispatchSession(ctx, cfg, account)
 		if err == nil {
-			result, runErr := a.runPromptWithSessionWithSink(ctx, cfg, session, request, InferenceStreamSink{
+			result, runErr := a.runPromptWithSessionWithSink(ctx, cfg, session, account.Email, request, InferenceStreamSink{
 				Text:            wrappedText,
 				Reasoning:       wrappedReasoning,
 				ReasoningWarmup: wrappedReasoningWarmup,
@@ -468,7 +468,7 @@ func (a *App) runPromptWithAccountPoolWithSink(r *http.Request, request PromptRu
 					if refreshedAccount, _, ok := cfg.FindAccount(account.Email); ok {
 						refreshedSession, loadErr := a.loadReadyDispatchSession(ctx, cfg, refreshedAccount)
 						if loadErr == nil {
-							result, retryErr := a.runPromptWithSessionWithSink(ctx, cfg, refreshedSession, request, InferenceStreamSink{
+							result, retryErr := a.runPromptWithSessionWithSink(ctx, cfg, refreshedSession, refreshedAccount.Email, request, InferenceStreamSink{
 								Text:            wrappedText,
 								Reasoning:       wrappedReasoning,
 								ReasoningWarmup: wrappedReasoningWarmup,

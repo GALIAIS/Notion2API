@@ -24,7 +24,7 @@ func newBestEffortTestClient(baseURL string) *NotionAIClient {
 			Name:  "token_v2",
 			Value: "test-cookie",
 		}},
-	}, cfg)
+	}, cfg, "")
 }
 
 func buildThreadErrorRecordMap(threadID string, spaceID string, messageID string, message string, subType string, traceID string) map[string]any {

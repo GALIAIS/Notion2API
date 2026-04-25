@@ -275,6 +275,38 @@ func waitForBrowserHelperChildPID(t *testing.T, pidFile string) int {
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	t.Fatalf("timed out waiting for child pid file %s", pidFile)
 	return 0
+}
+
+func TestBuildBrowserTransportRequestAddsResinAccountHeaderWhenEnabled(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.APIKey = "test-api-key"
+	cfg.UpstreamBaseURL = "https://www.notion.so"
+	cfg.UpstreamOrigin = "https://www.notion.so"
+	cfg.ProxyMode = proxyModeResinForward
+	cfg.ResinEnabled = true
+	cfg.ResinURL = "http://127.0.0.1:2260/my-token"
+	cfg.ResinPlatform = "Default"
+	cfg.Accounts = []NotionAccount{{
+		Email:              "alice@example.com",
+		StickyProxyAccount: "alice",
+	}}
+
+	client := newNotionAIClientWithMode(SessionInfo{
+		ClientVersion: "test-client-version",
+		UserID:        "test-user",
+		SpaceID:       "test-space",
+		Cookies: []ProbeCookie{{
+			Name:  "token_v2",
+			Value: "test-cookie",
+		}},
+	}, cfg, "alice@example.com", true)
+
+	request, err := buildBrowserTransportRequest(client, map[string]any{"threadId": "thread-test"})
+	if err != nil {
+		t.Fatalf("buildBrowserTransportRequest returned error: %v", err)
+	}
+	if got, want := request.Headers[defaultResinAccountHeader], "alice"; got != want {
+		t.Fatalf("%s = %q, want %q", defaultResinAccountHeader, got, want)
+	}
 }

@@ -456,7 +456,7 @@ func (a *App) handleAdminAccountsTest(w http.ResponseWriter, r *http.Request) {
 		SuppressUpstreamThreadPersistence: true,
 	}
 	conversationID := a.beginConversation("", "admin_account_test", "account_test", prompt, request)
-	result, err := a.runPromptWithSession(ctx, cfg, session, request, nil)
+	result, err := a.runPromptWithSession(ctx, cfg, session, activeEmail, request, nil)
 	if err != nil {
 		a.failConversation(conversationID, err)
 		writeAdminUpstreamError(w, err, map[string]any{"account": activeEmail})
@@ -602,7 +602,7 @@ func buildImportedSession(ctx context.Context, cfg AppConfig, req manualAccountI
 	var discovered discoveredAccountMetadata
 	var discoverErr error
 	if shouldTryDiscovery {
-		discovered, discoverErr = discoverImportedAccountMetadata(ctx, cfg, probe.Cookies, discoveredAccountMetadata{
+		discovered, discoverErr = discoverImportedAccountMetadata(ctx, cfg, probe.Email, probe.Cookies, discoveredAccountMetadata{
 			Email:         probe.Email,
 			UserID:        probe.UserID,
 			UserName:      userName,
@@ -786,6 +786,7 @@ func (a *App) handleAdminAccountLoginStart(w http.ResponseWriter, r *http.Reques
 		ProfileDir:       account.ProfileDir,
 		PendingPath:      account.PendingStatePath,
 		StorageStatePath: account.StorageStatePath,
+		AccountEmail:     account.Email,
 	})
 
 	cfg, _, _ = a.State.Snapshot()
@@ -848,6 +849,7 @@ func (a *App) handleAdminAccountLoginVerify(w http.ResponseWriter, r *http.Reque
 		PendingPath:      account.PendingStatePath,
 		StorageStatePath: account.StorageStatePath,
 		ProbePath:        account.ProbeJSON,
+		AccountEmail:     account.Email,
 	})
 
 	cfg, _, _ = a.State.Snapshot()

@@ -88,6 +88,7 @@ type NotionAccount struct {
 	Disabled            bool   `json:"disabled,omitempty"`
 	Priority            int    `json:"priority,omitempty"`
 	HourlyQuota         int    `json:"hourly_quota,omitempty"`
+	MaxConcurrency      int    `json:"max_concurrency,omitempty"`
 	WindowStartedAt     string `json:"window_started_at,omitempty"`
 	WindowRequestCount  int    `json:"window_request_count,omitempty"`
 	CooldownUntil       string `json:"cooldown_until,omitempty"`
@@ -587,6 +588,7 @@ func normalizeConfig(cfg AppConfig) AppConfig {
 			cfg.Accounts[i].ResinMode,
 		)
 		cfg.Accounts[i].StickyProxyAccount = strings.TrimSpace(cfg.Accounts[i].StickyProxyAccount)
+		cfg.Accounts[i].MaxConcurrency = normalizeAccountMaxConcurrency(cfg.Accounts[i].MaxConcurrency)
 		if cfg.Accounts[i].ProxyMode == "" {
 			cfg.Accounts[i].ProxyMode = cfg.normalizedProxyMode()
 		}

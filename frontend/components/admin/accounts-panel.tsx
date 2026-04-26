@@ -35,6 +35,7 @@ import type { AccountItem, AccountsPayload, JsonResult, ModelItem } from '@/lib/
 interface AccountEditState {
   priority: number;
   hourlyQuota: number;
+  maxConcurrency: number;
   disabled: boolean;
 }
 
@@ -83,6 +84,7 @@ function buildAccountEditMap(items: AccountItem[]): Record<string, AccountEditSt
     accumulator[item.email] = {
       priority: Number(item.priority ?? 0),
       hourlyQuota: Number(item.hourly_quota ?? 0),
+      maxConcurrency: Math.max(1, Number(item.max_concurrency ?? 1)),
       disabled: Boolean(item.disabled),
     };
     return accumulator;
@@ -298,8 +300,8 @@ export function AccountsPanel({
   const modelOptions = useMemo(() => models.filter((item) => item.id), [models]);
 
   const selectedEdit = selectedAccount?.email
-    ? accountEdits[selectedAccount.email] || { priority: 0, hourlyQuota: 0, disabled: false }
-    : { priority: 0, hourlyQuota: 0, disabled: false };
+    ? accountEdits[selectedAccount.email] || { priority: 0, hourlyQuota: 0, maxConcurrency: 1, disabled: false }
+    : { priority: 0, hourlyQuota: 0, maxConcurrency: 1, disabled: false };
 
   const summaryCards = [
     {
@@ -347,6 +349,7 @@ export function AccountsPanel({
       [email]: {
         priority: current[email]?.priority ?? 0,
         hourlyQuota: current[email]?.hourlyQuota ?? 0,
+        maxConcurrency: current[email]?.maxConcurrency ?? 1,
         disabled: current[email]?.disabled ?? false,
         ...patch,
       },
@@ -383,6 +386,7 @@ export function AccountsPanel({
         email,
         priority: edit.priority,
         hourly_quota: edit.hourlyQuota,
+        max_concurrency: edit.maxConcurrency,
         disabled: edit.disabled,
       });
       toast.success(`已保存 ${email}`);
@@ -724,7 +728,7 @@ export function AccountsPanel({
                         <div className="text-sm font-semibold">调度与限额</div>
                         <p className="mt-1 text-sm leading-6 text-muted-foreground">保存后直接写回账号池。</p>
                       </div>
-                      <div className="grid gap-4 md:grid-cols-2">
+                      <div className="grid gap-4 md:grid-cols-3">
                         <DetailField label="Priority">
                           <Input
                             type="number"
@@ -737,14 +741,27 @@ export function AccountsPanel({
                             className={FIELD_CLASS}
                           />
                         </DetailField>
-                        <DetailField label="Hourly Quota">
+                        <DetailField label="Hourly Quota" hint="0 表示不限制。">
                           <Input
                             type="number"
                             min="0"
                             value={selectedEdit.hourlyQuota}
                             onChange={(event) =>
                               updateAccountEdit(selectedAccount.email, {
-                                hourlyQuota: Number(event.target.value || 0),
+                                hourlyQuota: Math.max(0, Number(event.target.value || 0)),
+                              })
+                            }
+                            className={FIELD_CLASS}
+                          />
+                        </DetailField>
+                        <DetailField label="Max Concurrency" hint="每账号并发槽位，最小值 1。">
+                          <Input
+                            type="number"
+                            min="1"
+                            value={selectedEdit.maxConcurrency}
+                            onChange={(event) =>
+                              updateAccountEdit(selectedAccount.email, {
+                                maxConcurrency: Math.max(1, Number(event.target.value || 1)),
                               })
                             }
                             className={FIELD_CLASS}

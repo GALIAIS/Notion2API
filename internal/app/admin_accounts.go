@@ -72,6 +72,7 @@ func (a *App) accountRuntimeSummary(cfg AppConfig, account NotionAccount) map[st
 		"disabled":               account.Disabled,
 		"priority":               account.Priority,
 		"hourly_quota":           account.HourlyQuota,
+		"max_concurrency":        normalizeAccountMaxConcurrency(account.MaxConcurrency),
 		"quota_limited":          quotaLimited,
 		"remaining_quota":        remainingQuota,
 		"window_started_at":      account.WindowStartedAt,
@@ -238,6 +239,16 @@ func mergeEditableAccountFields(existing NotionAccount, payload map[string]any) 
 			return NotionAccount{}, false, fmt.Errorf("hourly_quota must be >= 0")
 		}
 		next.HourlyQuota = quota
+	}
+	if raw, ok := accountPayload["max_concurrency"]; ok {
+		limit, err := intFromPayloadValue(raw)
+		if err != nil {
+			return NotionAccount{}, false, fmt.Errorf("max_concurrency invalid: %w", err)
+		}
+		if limit < 1 {
+			return NotionAccount{}, false, fmt.Errorf("max_concurrency must be >= 1")
+		}
+		next.MaxConcurrency = limit
 	}
 	makeActive, _ := payload["active"].(bool)
 	return next, makeActive, nil

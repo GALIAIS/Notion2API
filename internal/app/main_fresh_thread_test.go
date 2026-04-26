@@ -3,9 +3,12 @@ package app
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -395,5 +398,92 @@ func TestHandleChatCompletionsStreamWritesErrorAfterHeadersSent(t *testing.T) {
 	}
 	if !strings.Contains(body, "data: [DONE]") {
 		t.Fatalf("expected stream done marker, got body=%s", body)
+	}
+}
+
+func TestNormalizeConfigDefaultsAccountMaxConcurrencyToOne(t *testing.T) {
+	cfg := normalizeConfig(AppConfig{
+		APIKey: "test-api-key",
+		Accounts: []NotionAccount{
+			{Email: "alice@example.com", MaxConcurrency: 0},
+			{Email: "bob@example.com", MaxConcurrency: -3},
+			{Email: "carol@example.com", MaxConcurrency: 4},
+		},
+	})
+	if got := cfg.Accounts[0].MaxConcurrency; got != 1 {
+		t.Fatalf("expected default max concurrency 1 for zero, got %d", got)
+	}
+	if got := cfg.Accounts[1].MaxConcurrency; got != 1 {
+		t.Fatalf("expected default max concurrency 1 for negative, got %d", got)
+	}
+	if got := cfg.Accounts[2].MaxConcurrency; got != 4 {
+		t.Fatalf("expected explicit max concurrency preserved, got %d", got)
+	}
+}
+
+func TestWriteUpstreamErrorMapsDispatchCapacityTo429(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.APIKey = "test-api-key"
+	cfg.Storage.SQLitePath = ""
+	state, err := newServerState(cfg)
+	if err != nil {
+		t.Fatalf("newServerState failed: %v", err)
+	}
+	defer func() {
+		_ = state.Close()
+	}()
+	app := &App{State: state}
+
+	rec := httptest.NewRecorder()
+	app.writeUpstreamError(rec, noDispatchCapacityError())
+
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected status 429, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"type":"rate_limit_error"`) {
+		t.Fatalf("expected rate_limit_error body, got %s", body)
+	}
+	if !strings.Contains(body, `"code":"dispatch_capacity_exceeded"`) {
+		t.Fatalf("expected dispatch_capacity_exceeded code, got %s", body)
+	}
+}
+
+func TestRunPromptWithAccountPoolReturnsCapacityErrorWhenAllSlotsOccupied(t *testing.T) {
+	probePath := filepath.Join(t.TempDir(), "probe.json")
+	if err := os.WriteFile(probePath, []byte(`{"cookies":[{"name":"token_v2","value":"test-cookie"}]}`), 0o644); err != nil {
+		t.Fatalf("write probe file failed: %v", err)
+	}
+
+	cfg := normalizeConfig(AppConfig{
+		APIKey: "test-api-key",
+		Accounts: []NotionAccount{
+			{Email: "alice@example.com", MaxConcurrency: 1, ProbeJSON: probePath},
+		},
+	})
+	state, err := newServerState(cfg)
+	if err != nil {
+		t.Fatalf("newServerState failed: %v", err)
+	}
+	defer func() {
+		_ = state.Close()
+	}()
+
+	if !state.TryAcquireAccountDispatchSlot("alice@example.com") {
+		t.Fatal("expected pre-acquire slot success")
+	}
+	defer state.ReleaseAccountDispatchSlot("alice@example.com")
+
+	app := &App{State: state}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	_, runErr := app.runPromptWithAccountPool(req, PromptRunRequest{Prompt: "hello"}, nil)
+	if runErr == nil {
+		t.Fatal("expected dispatch capacity error, got nil")
+	}
+	if !isDispatchCapacityExceededError(runErr) {
+		t.Fatalf("expected dispatch capacity sentinel error, got %v", runErr)
+	}
+	if !errors.Is(runErr, errDispatchCapacityExceeded) {
+		t.Fatalf("expected wrapped sentinel error, got %v", runErr)
 	}
 }

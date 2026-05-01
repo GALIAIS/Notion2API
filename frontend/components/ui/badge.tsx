@@ -5,14 +5,23 @@ import { cva, type VariantProps } from 'class-variance-authority';
 import { cn } from '@/lib/utils';
 
 const badgeVariants = cva(
-  'inline-flex w-fit shrink-0 items-center justify-center gap-1 overflow-hidden whitespace-nowrap rounded-md border px-2.5 py-1 text-xs font-medium transition-[color,box-shadow] [&>svg]:size-3.5 [&>svg]:pointer-events-none focus-visible:border-ring focus-visible:ring-ring/40 focus-visible:ring-[3px] aria-invalid:ring-destructive/20 aria-invalid:border-destructive',
+  [
+    'inline-flex w-fit shrink-0 items-center justify-center gap-1 overflow-hidden whitespace-nowrap',
+    'rounded-full border px-2.5 py-1 text-[11px] font-semibold tracking-tight',
+    'transition-[color,background-color,border-color,box-shadow]',
+    "[&>svg]:size-3.5 [&>svg]:pointer-events-none",
+    'focus-visible:ring-[3px] focus-visible:ring-[rgb(var(--primary-rgb)/0.32)]',
+    'aria-invalid:ring-destructive/20 aria-invalid:border-destructive',
+  ].join(' '),
   {
     variants: {
       variant: {
-        default: 'border-transparent bg-primary text-primary-foreground [a&]:hover:bg-primary/90',
-        secondary: 'border-transparent bg-secondary text-secondary-foreground [a&]:hover:bg-secondary/90',
-        destructive: 'border-transparent bg-destructive text-white [a&]:hover:bg-destructive/90 focus-visible:ring-destructive/20',
-        outline: 'bg-background text-foreground [a&]:hover:bg-accent [a&]:hover:text-accent-foreground',
+        default: 'border-transparent bg-[linear-gradient(135deg,#4F46E5_0%,#7C3AED_100%)] text-white shadow-[0_4px_12px_-4px_rgba(79,70,229,0.45)]',
+        secondary: 'border-[color-mix(in_oklab,var(--primary)_22%,transparent)] bg-[color-mix(in_oklab,var(--primary)_10%,var(--card))] text-[color-mix(in_oklab,var(--primary)_70%,var(--foreground))]',
+        destructive: 'border-transparent bg-destructive text-white focus-visible:ring-destructive/20',
+        outline: 'border-border bg-card text-foreground hover:bg-muted',
+        soft: 'border-[color-mix(in_oklab,var(--secondary)_24%,transparent)] bg-[color-mix(in_oklab,var(--secondary)_10%,var(--card))] text-[color-mix(in_oklab,var(--secondary)_70%,var(--foreground))]',
+        success: 'border-[color-mix(in_oklab,#10B981_28%,transparent)] bg-[color-mix(in_oklab,#10B981_14%,var(--card))] text-[color-mix(in_oklab,#10B981_55%,var(--foreground))]',
       },
     },
     defaultVariants: {

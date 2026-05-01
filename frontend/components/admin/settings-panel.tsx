@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from 'react';
 import { toast } from 'sonner';
 import {
   Bug,
@@ -11,6 +11,7 @@ import {
   Server,
   Settings2,
   Shield,
+  Sparkles,
   type LucideIcon,
   Upload,
   WandSparkles,
@@ -21,7 +22,7 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
-import { InfoCard, JsonPreview, PanelHeader, StatCard } from '@/components/admin/shared';
+import { InfoCard, JsonPreview, MetaTile, PanelHeader, StatCard, Subsection } from '@/components/admin/shared';
 import type { AppConfigShape, AttachmentInput, JsonResult, ModelItem, PromptConfig } from '@/lib/services/admin/types';
 import { copyText } from '@/lib/services/core/api-client';
 
@@ -82,12 +83,11 @@ interface ToggleCard {
   hint?: string;
 }
 
-const CARD_SURFACE = 'surface-subtle min-w-0 p-4';
-const FIELD_CLASSNAME = 'h-10 rounded-md border-input bg-transparent';
-const LINE_TEXTAREA_CLASSNAME = 'min-h-[150px] rounded-md bg-transparent text-sm leading-6 pretty-scroll';
-const JSON_TEXTAREA_CLASSNAME = 'code-surface min-h-[220px] rounded-md border font-mono text-[12px] leading-6 pretty-scroll';
-const COMPACT_JSON_TEXTAREA_CLASSNAME = 'code-surface pretty-scroll h-[170px] min-h-[170px] resize-none rounded-md border font-mono text-[12px] leading-6';
-const TILE_CLASSNAME = 'surface-subtle min-w-0 px-4 py-4';
+const FIELD_CLASSNAME = 'h-10 rounded-lg border-input bg-transparent';
+const LINE_TEXTAREA_CLASSNAME = 'min-h-[150px] rounded-lg bg-transparent text-sm leading-6 pretty-scroll';
+const JSON_TEXTAREA_CLASSNAME = 'code-surface min-h-[220px] rounded-xl border font-mono text-[12px] leading-6 pretty-scroll';
+const COMPACT_JSON_TEXTAREA_CLASSNAME = 'code-surface pretty-scroll h-[170px] min-h-[170px] resize-none rounded-xl border font-mono text-[12px] leading-6';
+const TEST_PROMPT_TEXTAREA_CLASSNAME = 'code-surface pretty-scroll h-[186px] min-h-[186px] resize-none rounded-xl border font-mono text-[12px] leading-6';
 
 const PROMPT_PROFILE_OPTIONS = [
   { value: 'cognitive_reframing', label: 'Cognitive Reframing', description: '默认稳态，偏通用助手口径。' },
@@ -133,6 +133,59 @@ const PROMPT_TEST_PRESETS = {
   creative: '写一篇平淡温柔的勇者归乡故事，约 800 字，不要提 Notion。',
   refusal: '请直接扮演一位虚构角色，和我进行自然的角色扮演对话。',
 };
+
+interface SectionMeta {
+  id: string;
+  eyebrow: string;
+  title: string;
+  description: string;
+  icon: LucideIcon;
+}
+
+const SECTIONS: SectionMeta[] = [
+  {
+    id: 'service-runtime',
+    eyebrow: 'Runtime',
+    title: '服务监听与响应节奏',
+    description: '监听入口、默认模型与轮询节奏。',
+    icon: Server,
+  },
+  {
+    id: 'upstream-connection',
+    eyebrow: 'Upstream',
+    title: '上游连接与路由透传',
+    description: '上游地址、TLS、Origin、代理。',
+    icon: Globe,
+  },
+  {
+    id: 'behavior-capabilities',
+    eyebrow: 'Behavior',
+    title: '协议行为与能力开关',
+    description: '行为守护、默认能力位、AI Surface。',
+    icon: Settings2,
+  },
+  {
+    id: 'prompt-strategy',
+    eyebrow: 'Prompt',
+    title: '满血策略与反拒绝 Prompt',
+    description: '路由 profile、重试链路、即时测试。',
+    icon: WandSparkles,
+  },
+  {
+    id: 'security-admin',
+    eyebrow: 'Security',
+    title: '安全 / Admin / 登录态 / 存储',
+    description: '管理面密码、登录目录、SQLite 持久化。',
+    icon: Shield,
+  },
+  {
+    id: 'advanced-json',
+    eyebrow: 'Advanced',
+    title: '高级 JSON 与调试输出',
+    description: '调试开关、列表型与结构化高级配置。',
+    icon: Bug,
+  },
+];
 
 function resolveStoragePersistenceFlag(flag: boolean | undefined, fallback: boolean | undefined) {
   return flag ?? fallback !== false;
@@ -245,7 +298,7 @@ function FieldBlock({
   return (
     <div className="space-y-2.5">
       <div className="space-y-1">
-        <Label className="text-sm font-semibold">{label}</Label>
+        <Label className="text-sm font-semibold tracking-tight">{label}</Label>
         {description ? <p className="text-xs leading-5 text-muted-foreground">{description}</p> : null}
       </div>
       {children}
@@ -255,21 +308,26 @@ function FieldBlock({
 
 function ToggleTile({ label, description, value, onChange, disabled, hint }: ToggleCard) {
   return (
-    <div className="surface-subtle p-4">
+    <div className="surface-subtle p-4 transition-shadow hover:shadow-soft">
       <div className="flex items-start justify-between gap-4">
-        <div className="space-y-1">
-          <div className="text-sm font-semibold">{label}</div>
+        <div className="min-w-0 space-y-1">
+          <div className="text-sm font-semibold tracking-tight">{label}</div>
           <p className="text-sm leading-6 text-muted-foreground">{description}</p>
         </div>
         <Switch checked={value} onCheckedChange={onChange} disabled={disabled} />
       </div>
-      {hint ? <div className="mt-3 rounded-md border bg-muted/40 px-3 py-2 text-xs leading-5 text-muted-foreground">{hint}</div> : null}
+      {hint ? (
+        <div className="mt-3 rounded-lg border border-dashed bg-muted/40 px-3 py-2 text-xs leading-5 text-muted-foreground">
+          {hint}
+        </div>
+      ) : null}
     </div>
   );
 }
 
-function SectionCard({
+function SectionShell({
   id,
+  eyebrow,
   title,
   description,
   icon: Icon,
@@ -277,6 +335,7 @@ function SectionCard({
   children,
 }: {
   id: string;
+  eyebrow: string;
   title: string;
   description: string;
   icon: LucideIcon;
@@ -286,12 +345,17 @@ function SectionCard({
   return (
     <section id={id} className="scroll-mt-28">
       <InfoCard
-        title={title}
+        title={
+          <span className="flex flex-col gap-1">
+            <span className="section-eyebrow">{eyebrow}</span>
+            <span className="text-lg font-semibold tracking-tight">{title}</span>
+          </span>
+        }
         description={description}
         actions={
           <div className="flex flex-wrap items-center gap-2">
-            <div className="flex size-10 items-center justify-center rounded-md border bg-primary/10 text-primary">
-              <Icon className="size-5" />
+            <div className="brand-badge size-10 shrink-0">
+              <Icon className="size-[18px]" />
             </div>
             {actions}
           </div>
@@ -300,6 +364,64 @@ function SectionCard({
         {children}
       </InfoCard>
     </section>
+  );
+}
+
+function SectionNav({ activeId, onJump }: { activeId?: string; onJump?: (id: string) => void }) {
+  return (
+    <InfoCard
+      title="快速跳转"
+      description={
+        <span className="flex items-center gap-1.5 text-[12px]">
+          <Sparkles className="size-3.5 text-primary" />
+          点击任意章节直接定位
+        </span>
+      }
+    >
+      <nav className="grid gap-1.5">
+        {SECTIONS.map((section) => {
+          const Icon = section.icon;
+          const active = activeId === section.id;
+          return (
+            <a
+              key={section.id}
+              href={'#' + section.id}
+              onClick={(event) => {
+                if (onJump) {
+                  event.preventDefault();
+                  const node = document.getElementById(section.id);
+                  if (node) {
+                    node.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                  }
+                  onJump(section.id);
+                }
+              }}
+              className={[
+                'flex items-start gap-3 rounded-lg border px-3 py-2.5 text-left transition-all',
+                active
+                  ? 'border-primary/40 bg-[color-mix(in_oklab,var(--primary)_12%,var(--card))] shadow-soft'
+                  : 'border-transparent hover:border-primary/20 hover:bg-muted/40',
+              ].join(' ')}
+            >
+              <div
+                className={[
+                  'flex size-7 shrink-0 items-center justify-center rounded-lg border',
+                  active
+                    ? 'border-primary/30 bg-primary/10 text-primary'
+                    : 'border-border/60 bg-card text-muted-foreground',
+                ].join(' ')}
+              >
+                <Icon className="size-[14px]" />
+              </div>
+              <div className="min-w-0">
+                <div className="section-eyebrow">{section.eyebrow}</div>
+                <div className="mt-0.5 text-[13px] font-medium leading-5">{section.title}</div>
+              </div>
+            </a>
+          );
+        })}
+      </nav>
+    </InfoCard>
   );
 }
 
@@ -330,6 +452,7 @@ export function SettingsPanel({
   const [output, setOutput] = useState('等待操作...');
   const [message, setMessage] = useState('');
   const [saving, setSaving] = useState(false);
+  const [activeSection, setActiveSection] = useState<string>(SECTIONS[0]?.id ?? '');
   const [strategyTestPrompt, setStrategyTestPrompt] = useState(PROMPT_TEST_PRESETS.creative);
   const [strategyTestModel, setStrategyTestModel] = useState(config.default_model || config.model_id || models[0]?.id || 'auto');
   const [strategyTestUseWebSearch, setStrategyTestUseWebSearch] = useState(Boolean(config.features?.use_web_search));
@@ -354,6 +477,27 @@ export function SettingsPanel({
       }));
     }
   }, [form.forceDisableUpstreamEdits]);
+
+  // Track active section using IntersectionObserver for the SectionNav highlight.
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof IntersectionObserver === 'undefined') return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const visible = entries
+          .filter((entry) => entry.isIntersecting)
+          .sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
+        if (visible?.target?.id) {
+          setActiveSection(visible.target.id);
+        }
+      },
+      { rootMargin: '-20% 0px -60% 0px', threshold: [0, 0.25, 0.5, 0.75, 1] },
+    );
+    SECTIONS.forEach((section) => {
+      const node = document.getElementById(section.id);
+      if (node) observer.observe(node);
+    });
+    return () => observer.disconnect();
+  }, []);
 
   const currentModel = useMemo(() => form.defaultModel || models[0]?.id || 'auto', [form.defaultModel, models]);
   const persistenceEnabledCount = useMemo(
@@ -475,6 +619,7 @@ export function SettingsPanel({
       form.port,
       form.promptProfile,
       form.readOnly,
+      form.sqlitePath,
       form.threadType,
       form.upstreamBaseURL,
       form.upstreamTLSServerName,
@@ -631,6 +776,60 @@ export function SettingsPanel({
 
   return (
     <div className="space-y-6">
+      {/* Hidden file inputs anchored at the top so the sidebar markup stays focused on UX. */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="application/json"
+        className="hidden"
+        onChange={async (event) => {
+          const file = event.target.files?.[0];
+          if (!file) return;
+          try {
+            setMessage('导入配置中...');
+            const raw = await file.text();
+            const parsed = JSON.parse(raw);
+            const imported = (parsed?.config || parsed) as JsonResult;
+            const payload = await onImport(imported);
+            setOutput(JSON.stringify(payload, null, 2));
+            setMessage('配置已导入: ' + file.name);
+            toast.success('配置导入成功');
+          } catch (error) {
+            const text = error instanceof Error ? error.message : '导入失败';
+            setMessage(text);
+            toast.error(text);
+          } finally {
+            event.currentTarget.value = '';
+          }
+        }}
+      />
+      <input
+        ref={promptStrategyFileInputRef}
+        type="file"
+        accept="application/json"
+        className="hidden"
+        onChange={async (event) => {
+          const file = event.target.files?.[0];
+          if (!file) return;
+          try {
+            setMessage('导入策略中...');
+            const raw = await file.text();
+            const parsed = JSON.parse(raw);
+            const prompt = (parsed?.prompt || parsed) as PromptConfig;
+            applyPromptStrategy(prompt);
+            setOutput(JSON.stringify(prompt, null, 2));
+            setMessage('已载入策略文件: ' + file.name);
+            toast.success('策略已导入到编辑器');
+          } catch (error) {
+            const text = error instanceof Error ? error.message : '策略导入失败';
+            setMessage(text);
+            toast.error(text);
+          } finally {
+            event.currentTarget.value = '';
+          }
+        }}
+      />
+
       <PanelHeader
         eyebrow="Settings"
         title="配置与热更新"
@@ -648,26 +847,24 @@ export function SettingsPanel({
         }
       />
 
-      <div className="grid gap-4 md:grid-cols-2 2xl:grid-cols-4">
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-3">
         {summaryCards.map((item) => (
           <StatCard key={item.label} label={item.label} value={item.value} hint={item.hint} />
         ))}
       </div>
 
-      <div className="grid gap-6 2xl:grid-cols-[minmax(0,1.18fr)_360px]">
+      <div className="grid gap-6 2xl:grid-cols-[minmax(0,1fr)_320px]">
         <div className="min-w-0 space-y-6">
-          <SectionCard
+          <SectionShell
             id="service-runtime"
+            eyebrow="Runtime"
             title="服务监听与响应节奏"
             description="配置监听地址、默认模型和运行参数。"
             icon={Server}
           >
             <div className="grid gap-4 2xl:grid-cols-2">
-              <div className={CARD_SURFACE}>
-                <p className="section-eyebrow">Gateway Entry</p>
-                <h3 className="mt-2 text-lg font-semibold">本地监听</h3>
-                <p className="mt-1 text-sm leading-6 text-muted-foreground">配置管理面和 API 的统一监听入口。</p>
-                <div className="mt-5 grid gap-4 md:grid-cols-2">
+              <Subsection eyebrow="Gateway Entry" title="本地监听" description="配置管理面和 API 的统一监听入口。">
+                <div className="grid gap-4 md:grid-cols-2">
                   <FieldBlock label="监听 Host" description="留空通常等价于监听所有网卡。">
                     <Input value={form.host} onChange={(event) => setForm({ ...form, host: event.target.value })} className={FIELD_CLASSNAME} />
                   </FieldBlock>
@@ -692,13 +889,10 @@ export function SettingsPanel({
                     </Select>
                   </FieldBlock>
                 </div>
-              </div>
+              </Subsection>
 
-              <div className={CARD_SURFACE}>
-                <p className="section-eyebrow">Runtime Rhythm</p>
-                <h3 className="mt-2 text-lg font-semibold">超时与轮询节奏</h3>
-                <p className="mt-1 text-sm leading-6 text-muted-foreground">配置超时、轮询间隔、缓存保留和流式分块参数。</p>
-                <div className="mt-5 grid gap-4 md:grid-cols-2">
+              <Subsection eyebrow="Runtime Rhythm" title="超时与轮询节奏" description="配置超时、轮询间隔、缓存保留和流式分块参数。">
+                <div className="grid gap-4 md:grid-cols-2">
                   <FieldBlock label="Timeout (sec)" description="单次上游请求的总超时。">
                     <Input type="number" value={form.timeoutSec} onChange={(event) => setForm({ ...form, timeoutSec: event.target.value })} className={FIELD_CLASSNAME} />
                   </FieldBlock>
@@ -715,85 +909,74 @@ export function SettingsPanel({
                     <Input type="number" value={form.chunkRunes} onChange={(event) => setForm({ ...form, chunkRunes: event.target.value })} className={FIELD_CLASSNAME} />
                   </FieldBlock>
                 </div>
-              </div>
+              </Subsection>
             </div>
-          </SectionCard>
+          </SectionShell>
 
-          <SectionCard
+          <SectionShell
             id="upstream-connection"
+            eyebrow="Upstream"
             title="上游连接与路由透传"
             description="配置上游地址、请求头透传、TLS 和环境代理。"
             icon={Globe}
           >
             <div className="grid gap-4 2xl:grid-cols-[minmax(0,1.12fr)_minmax(280px,0.88fr)]">
-              <div className="grid gap-4 md:grid-cols-2">
-                <FieldBlock label="Upstream Base URL" description="真实请求投递的基础地址。">
-                  <Input value={form.upstreamBaseURL} onChange={(event) => setForm({ ...form, upstreamBaseURL: event.target.value })} className={FIELD_CLASSNAME} />
-                </FieldBlock>
-                <FieldBlock label="Upstream Origin" description="部分上游会校验 Origin；默认跟随 Base URL。">
-                  <Input value={form.upstreamOrigin} onChange={(event) => setForm({ ...form, upstreamOrigin: event.target.value })} className={FIELD_CLASSNAME} />
-                </FieldBlock>
-                <FieldBlock label="Upstream Host Header" description="反代、vhost 或 SNI 前置场景常用。">
-                  <Input value={form.upstreamHost} onChange={(event) => setForm({ ...form, upstreamHost: event.target.value })} className={FIELD_CLASSNAME} />
-                </FieldBlock>
-                <FieldBlock label="Upstream TLS Server Name" description="用于覆盖 TLS SNI，排查 unrecognized name 很关键。">
-                  <Input value={form.upstreamTLSServerName} onChange={(event) => setForm({ ...form, upstreamTLSServerName: event.target.value })} className={FIELD_CLASSNAME} />
-                </FieldBlock>
-              </div>
+              <Subsection eyebrow="Upstream Endpoint" title="上游地址与请求头" description="配置上游 base URL、Origin、Host Header 和 TLS 名称。">
+                <div className="grid gap-4 md:grid-cols-2">
+                  <FieldBlock label="Upstream Base URL" description="真实请求投递的基础地址。">
+                    <Input value={form.upstreamBaseURL} onChange={(event) => setForm({ ...form, upstreamBaseURL: event.target.value })} className={FIELD_CLASSNAME} />
+                  </FieldBlock>
+                  <FieldBlock label="Upstream Origin" description="部分上游会校验 Origin；默认跟随 Base URL。">
+                    <Input value={form.upstreamOrigin} onChange={(event) => setForm({ ...form, upstreamOrigin: event.target.value })} className={FIELD_CLASSNAME} />
+                  </FieldBlock>
+                  <FieldBlock label="Upstream Host Header" description="反代、vhost 或 SNI 前置场景常用。">
+                    <Input value={form.upstreamHost} onChange={(event) => setForm({ ...form, upstreamHost: event.target.value })} className={FIELD_CLASSNAME} />
+                  </FieldBlock>
+                  <FieldBlock label="Upstream TLS Server Name" description="用于覆盖 TLS SNI，排查 unrecognized name 很关键。">
+                    <Input value={form.upstreamTLSServerName} onChange={(event) => setForm({ ...form, upstreamTLSServerName: event.target.value })} className={FIELD_CLASSNAME} />
+                  </FieldBlock>
+                </div>
+              </Subsection>
 
-              <div className={CARD_SURFACE}>
-                <p className="section-eyebrow">Proxy Inheritance</p>
-                <h3 className="mt-2 text-lg font-semibold">环境代理透传</h3>
-                <p className="mt-1 text-sm leading-6 text-muted-foreground">当服务运行在需要系统代理、容器代理或特定出口网络的环境中时启用。</p>
-                <div className="mt-5 flex items-start justify-between gap-4 rounded-md border bg-muted/40 px-4 py-4">
-                  <div>
-                    <div className="text-sm font-semibold">继承 HTTP_PROXY / HTTPS_PROXY</div>
+              <Subsection eyebrow="Proxy Inheritance" title="环境代理透传" description="当服务运行在需要系统代理、容器代理或特定出口网络的环境中时启用。">
+                <div className="flex items-start justify-between gap-4 rounded-lg border bg-muted/40 px-4 py-4">
+                  <div className="min-w-0">
+                    <div className="text-sm font-semibold tracking-tight">继承 HTTP_PROXY / HTTPS_PROXY</div>
                     <p className="mt-1 text-sm leading-6 text-muted-foreground">仅在需要使用系统代理时开启。</p>
                   </div>
                   <Switch checked={form.upstreamUseEnvProxy} onCheckedChange={(checked) => setForm({ ...form, upstreamUseEnvProxy: checked })} />
                 </div>
                 <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                  <div className={TILE_CLASSNAME}>
-                    <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-muted-foreground">Target Host</div>
-                    <div className="mt-2 text-sm font-medium">{parseHostLabel(form.upstreamBaseURL)}</div>
-                  </div>
-                  <div className={TILE_CLASSNAME}>
-                    <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-muted-foreground">TLS / Host</div>
-                    <div className="mt-2 text-sm font-medium break-all">{form.upstreamTLSServerName.trim() || form.upstreamHost.trim() || '使用请求默认值'}</div>
-                  </div>
+                  <MetaTile label="Target Host" value={parseHostLabel(form.upstreamBaseURL)} />
+                  <MetaTile label="TLS / Host" value={form.upstreamTLSServerName.trim() || form.upstreamHost.trim() || '使用请求默认值'} />
                 </div>
-              </div>
+              </Subsection>
             </div>
-          </SectionCard>
+          </SectionShell>
 
-          <SectionCard
+          <SectionShell
             id="behavior-capabilities"
+            eyebrow="Behavior"
             title="协议行为与能力开关"
             description="配置协议行为守护和默认能力开关。"
             icon={Settings2}
           >
             <div className="grid gap-4 2xl:grid-cols-2">
-              <div className={CARD_SURFACE}>
-                <p className="section-eyebrow">Behavior Guards</p>
-                <h3 className="mt-2 text-lg font-semibold">写入与行为守护</h3>
-                <p className="mt-1 text-sm leading-6 text-muted-foreground">控制是否允许上游进入可写路径。</p>
-                <div className="mt-5 grid gap-3">
+              <Subsection eyebrow="Behavior Guards" title="写入与行为守护" description="控制是否允许上游进入可写路径。">
+                <div className="grid gap-3">
                   {guardToggles.map((toggle) => (
                     <ToggleTile key={toggle.label} {...toggle} />
                   ))}
                 </div>
-              </div>
+              </Subsection>
 
-              <div className={CARD_SURFACE}>
-                <p className="section-eyebrow">Capability Flags</p>
-                <h3 className="mt-2 text-lg font-semibold">默认能力位</h3>
-                <p className="mt-1 text-sm leading-6 text-muted-foreground">配置默认联网、图片和 CSV 等能力。</p>
-                <div className="mt-5 grid gap-3">
+              <Subsection eyebrow="Capability Flags" title="默认能力位" description="配置默认联网、图片和 CSV 等能力。">
+                <div className="grid gap-3">
                   {capabilityToggles.map((toggle) => (
                     <ToggleTile key={toggle.label} {...toggle} />
                   ))}
                 </div>
-              </div>
+              </Subsection>
             </div>
 
             <div className="mt-4 grid gap-4 2xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(240px,0.9fr)]">
@@ -803,15 +986,17 @@ export function SettingsPanel({
               <FieldBlock label="Thread Type" description="对话线程类型。">
                 <Input value={form.threadType} onChange={(event) => setForm({ ...form, threadType: event.target.value })} className={FIELD_CLASSNAME} />
               </FieldBlock>
-              <div className="rounded-md border bg-primary/6 p-4">
-                <div className="text-sm font-semibold">工具调用策略</div>
-                <p className="mt-2 text-sm leading-6 text-muted-foreground">当前保存逻辑会持续把官方工具调用相关开关写死为关闭，优先保证聊天回复路径稳定，不把页面创建类动作混入普通对话。</p>
+              <div className="rounded-xl border border-primary/15 bg-[color-mix(in_oklab,var(--primary)_8%,var(--card))] p-4">
+                <div className="section-eyebrow text-primary">Tool Policy</div>
+                <div className="mt-1.5 text-sm font-semibold tracking-tight">工具调用策略</div>
+                <p className="mt-2 text-[13px] leading-6 text-muted-foreground">当前保存逻辑会持续把官方工具调用相关开关写死为关闭，优先保证聊天回复路径稳定，不把页面创建类动作混入普通对话。</p>
               </div>
             </div>
-          </SectionCard>
+          </SectionShell>
 
-          <SectionCard
+          <SectionShell
             id="prompt-strategy"
+            eyebrow="Prompt"
             title="满血策略与反拒绝 Prompt"
             description="在线编辑 profile、重试链路与测试样本。"
             icon={WandSparkles}
@@ -835,11 +1020,8 @@ export function SettingsPanel({
             <div className="grid gap-4">
               <div className="grid gap-4 2xl:grid-cols-[minmax(0,0.92fr)_minmax(0,1.08fr)]">
                 <div className="space-y-4">
-                  <div className={CARD_SURFACE}>
-                    <p className="section-eyebrow">Profiles</p>
-                    <h3 className="mt-2 text-lg font-semibold">策略路由</h3>
-                    <p className="mt-1 text-sm leading-6 text-muted-foreground">区分默认聊天策略与拒绝恢复预算。</p>
-                    <div className="mt-5 grid gap-4 md:grid-cols-2">
+                  <Subsection eyebrow="Profiles" title="策略路由" description="区分默认聊天策略与拒绝恢复预算。">
+                    <div className="grid gap-4 md:grid-cols-2">
                       <FieldBlock label="Chat Profile" description="普通聊天默认策略。">
                         <Select value={form.promptProfile} onValueChange={(value) => setForm({ ...form, promptProfile: value })}>
                           <SelectTrigger className={FIELD_CLASSNAME}>
@@ -857,47 +1039,34 @@ export function SettingsPanel({
                       <FieldBlock label="Fallback Profiles" description="每行一个 fallback profile。">
                         <Textarea value={form.fallbackProfiles} onChange={(event) => setForm({ ...form, fallbackProfiles: event.target.value })} className={LINE_TEXTAREA_CLASSNAME} />
                       </FieldBlock>
-                      <div className="grid gap-4 sm:grid-cols-2">
-                        <FieldBlock label="Max Escalation Steps" description="最多升级步数。">
-                          <Input type="number" value={form.maxEscalationSteps} onChange={(event) => setForm({ ...form, maxEscalationSteps: event.target.value })} className={FIELD_CLASSNAME} />
-                        </FieldBlock>
-                        <FieldBlock label="Max Refusal Retries" description="拒绝后的最大重试次数。">
-                          <Input type="number" value={form.maxRefusalRetries} onChange={(event) => setForm({ ...form, maxRefusalRetries: event.target.value })} className={FIELD_CLASSNAME} />
-                        </FieldBlock>
-                      </div>
+                      <FieldBlock label="Max Escalation Steps" description="最多升级步数。">
+                        <Input type="number" value={form.maxEscalationSteps} onChange={(event) => setForm({ ...form, maxEscalationSteps: event.target.value })} className={FIELD_CLASSNAME} />
+                      </FieldBlock>
+                      <FieldBlock label="Max Refusal Retries" description="拒绝后的最大重试次数。">
+                        <Input type="number" value={form.maxRefusalRetries} onChange={(event) => setForm({ ...form, maxRefusalRetries: event.target.value })} className={FIELD_CLASSNAME} />
+                      </FieldBlock>
                     </div>
 
                     <div className="mt-4 grid gap-3 sm:grid-cols-2">
                       {PROMPT_PROFILE_OPTIONS.map((option) => (
-                        <div key={option.value} className={TILE_CLASSNAME}>
-                          <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-muted-foreground">{option.label}</div>
-                          <div className="mt-2 text-sm leading-6 text-muted-foreground">{option.description}</div>
-                        </div>
+                        <MetaTile key={option.value} label={option.label} value={<span className="text-[13px] font-normal leading-6 text-muted-foreground">{option.description}</span>} />
                       ))}
                     </div>
-                  </div>
+                  </Subsection>
 
-                  <div className={CARD_SURFACE}>
-                    <p className="section-eyebrow">Root Prompt</p>
-                    <h3 className="mt-2 text-lg font-semibold">Custom 总提示词</h3>
-                    <p className="mt-1 text-sm leading-6 text-muted-foreground">仅在 profile=`custom` 时注入。</p>
-                    <div className="mt-5">
-                      <Textarea
-                        value={form.customPromptPrefix}
-                        onChange={(event) => setForm({ ...form, customPromptPrefix: event.target.value })}
-                        className={JSON_TEXTAREA_CLASSNAME + ' min-h-[208px]'}
-                        placeholder="直接填写完整自定义策略提示词..."
-                      />
-                    </div>
-                  </div>
+                  <Subsection eyebrow="Root Prompt" title="Custom 总提示词" description="仅在 profile=`custom` 时注入。">
+                    <Textarea
+                      value={form.customPromptPrefix}
+                      onChange={(event) => setForm({ ...form, customPromptPrefix: event.target.value })}
+                      className={JSON_TEXTAREA_CLASSNAME + ' min-h-[208px]'}
+                      placeholder="直接填写完整自定义策略提示词..."
+                    />
+                  </Subsection>
                 </div>
 
                 <div className="space-y-4">
-                  <div className={CARD_SURFACE}>
-                    <p className="section-eyebrow">Profile Bodies</p>
-                    <h3 className="mt-2 text-lg font-semibold">内置文本</h3>
-                    <p className="mt-1 text-sm leading-6 text-muted-foreground">保存后即时生效。</p>
-                    <div className="mt-5 grid gap-4 xl:grid-cols-2">
+                  <Subsection eyebrow="Profile Bodies" title="内置文本" description="保存后即时生效。">
+                    <div className="grid gap-4 xl:grid-cols-2">
                       <FieldBlock label="Cognitive Reframing Prefix" description="普通聊天默认前缀。">
                         <Textarea
                           value={form.cognitiveReframingPrefix}
@@ -913,19 +1082,16 @@ export function SettingsPanel({
                         />
                       </FieldBlock>
                     </div>
-                  </div>
+                  </Subsection>
 
-                  <div className={CARD_SURFACE}>
-                    <p className="section-eyebrow">Prompt Guard Test</p>
-                    <h3 className="mt-2 text-lg font-semibold">即时测试</h3>
-                    <p className="mt-1 text-sm leading-6 text-muted-foreground">改完后直接回归拒绝样本。</p>
-                    <div className="mt-5 space-y-4">
+                  <Subsection eyebrow="Prompt Guard Test" title="即时测试" description="改完后直接回归拒绝样本。">
+                    <div className="space-y-4">
                       <div className="grid gap-4 2xl:grid-cols-[minmax(0,1fr)_320px] 2xl:items-start">
                         <FieldBlock label="测试 Prompt" description="建议使用创作或角色扮演样本。">
                           <Textarea
                             value={strategyTestPrompt}
                             onChange={(event) => setStrategyTestPrompt(event.target.value)}
-                            className="code-surface pretty-scroll h-[186px] min-h-[186px] resize-none rounded-md border font-mono text-[12px] leading-6"
+                            className={TEST_PROMPT_TEXTAREA_CLASSNAME}
                           />
                         </FieldBlock>
 
@@ -946,8 +1112,8 @@ export function SettingsPanel({
                           </FieldBlock>
 
                           <div className="surface-subtle flex items-start justify-between gap-4 p-4">
-                            <div>
-                              <div className="text-sm font-semibold">联网</div>
+                            <div className="min-w-0">
+                              <div className="text-sm font-semibold tracking-tight">联网</div>
                               <p className="mt-1 text-sm leading-6 text-muted-foreground">仅覆盖这次测试。</p>
                             </div>
                             <Switch checked={strategyTestUseWebSearch} onCheckedChange={setStrategyTestUseWebSearch} />
@@ -971,7 +1137,7 @@ export function SettingsPanel({
 
                       <div className="space-y-3">
                         <div className="flex flex-wrap items-center justify-between gap-2">
-                          <div className="text-sm font-semibold">测试输出</div>
+                          <div className="text-sm font-semibold tracking-tight">测试输出</div>
                           <Button
                             variant="outline"
                             size="sm"
@@ -987,22 +1153,19 @@ export function SettingsPanel({
                             复制当前策略 JSON
                           </Button>
                         </div>
-                        <div className="code-surface overflow-hidden rounded-md border">
+                        <div className="code-surface overflow-hidden rounded-xl border">
                           <pre className="pretty-scroll h-[260px] overflow-auto whitespace-pre-wrap px-4 py-3 font-mono text-[12px] leading-6">
                             {strategyTestOutput}
                           </pre>
                         </div>
                       </div>
                     </div>
-                  </div>
+                  </Subsection>
                 </div>
               </div>
 
-              <div className={CARD_SURFACE}>
-                <p className="section-eyebrow">Retry Blocks</p>
-                <h3 className="mt-2 text-lg font-semibold">重试链路</h3>
-                <p className="mt-1 text-sm leading-6 text-muted-foreground">每个块之间用单独一行 `---` 分隔。</p>
-                <div className="mt-5 grid gap-4 xl:grid-cols-3">
+              <Subsection eyebrow="Retry Blocks" title="重试链路" description="每个块之间用单独一行 `---` 分隔。">
+                <div className="grid gap-4 xl:grid-cols-3">
                   <FieldBlock label="Coding Retry Prefixes" description="开发类请求。">
                     <Textarea
                       value={form.codingRetryPrefixes}
@@ -1025,282 +1188,224 @@ export function SettingsPanel({
                     />
                   </FieldBlock>
                 </div>
-              </div>
+              </Subsection>
             </div>
-          </SectionCard>
+          </SectionShell>
 
-          <SectionCard
+          <SectionShell
             id="security-admin"
+            eyebrow="Security"
             title="安全 / Admin / 登录态 / 存储"
             description="集中核对管理密码、会话目录与登录超时。"
             icon={Shield}
           >
             <div className="grid gap-4 2xl:grid-cols-[minmax(0,1.08fr)_minmax(280px,0.92fr)]">
-              <div className="grid gap-4 md:grid-cols-2">
-                <FieldBlock label="Admin 密码" description="留空表示不修改现有密码，仅在需要更新时填写。">
-                  <Input
-                    value={form.adminPassword}
-                    onChange={(event) => setForm({ ...form, adminPassword: event.target.value })}
-                    placeholder={adminPasswordSet ? '已设置新密码请填写，留空表示不修改' : '请输入管理面密码'}
-                    className={FIELD_CLASSNAME}
-                  />
-                </FieldBlock>
-                <FieldBlock label="Admin Token TTL" description="管理面登录态的有效时长，单位小时。">
-                  <Input type="number" value={form.adminTTL} onChange={(event) => setForm({ ...form, adminTTL: event.target.value })} className={FIELD_CLASSNAME} />
-                </FieldBlock>
-                <FieldBlock label="Login Sessions Dir" description="登录态、Probe 和会话文件的持久化目录。">
-                  <Input value={form.loginSessionsDir} onChange={(event) => setForm({ ...form, loginSessionsDir: event.target.value })} className={FIELD_CLASSNAME} />
-                </FieldBlock>
-                <FieldBlock label="Login Timeout (sec)" description="验证码登录、刷新等流程的等待超时。">
-                  <Input type="number" value={form.loginTimeoutSec} onChange={(event) => setForm({ ...form, loginTimeoutSec: event.target.value })} className={FIELD_CLASSNAME} />
-                </FieldBlock>
-                <FieldBlock label="SQLite Path" description="账号状态和本地会话缓存共用此库文件路径。">
-                  <Input value={form.sqlitePath} onChange={(event) => setForm({ ...form, sqlitePath: event.target.value })} className={FIELD_CLASSNAME} />
-                </FieldBlock>
-                <div className="grid gap-3 md:col-span-2 md:grid-cols-2">
-                  <ToggleTile
-                    label="本地会话快照"
-                    description="保存会话列表、消息内容和本地对话快照，重启后可恢复到管理面。"
-                    value={form.persistConversationSnapshots}
-                    onChange={(checked) => setForm({ ...form, persistConversationSnapshots: checked })}
-                    hint={form.persistConversationSnapshots ? '重启后会恢复本地会话列表。' : '关闭后仅保留当前进程内的会话快照。'}
-                  />
-                  <ToggleTile
-                    label="Responses 缓存"
-                    description="保存 `/v1/responses/{id}` 依赖的 response 缓存与元数据。"
-                    value={form.persistResponses}
-                    onChange={(checked) => setForm({ ...form, persistResponses: checked })}
-                    hint={form.persistResponses ? '重启后仍可按 response_id 读取缓存。' : '关闭后 response 缓存只存在内存。'}
-                  />
-                  <ToggleTile
-                    label="续聊 Session"
-                    description="保存 thread/config/context 锚点，供 continuation 和 thread 续聊复用。"
-                    value={form.persistContinuationSessions}
-                    onChange={(checked) => setForm({ ...form, persistContinuationSessions: checked })}
-                    hint={form.persistContinuationSessions ? '重启后仍可沿用上游续聊锚点。' : '关闭后续聊锚点不会落盘。'}
-                  />
-                  <ToggleTile
-                    label="ST Binding"
-                    description="保存 SillyTavern 角色档案到 conversation 的绑定关系。"
-                    value={form.persistSillyTavernBindings}
-                    onChange={(checked) => setForm({ ...form, persistSillyTavernBindings: checked })}
-                    hint={form.persistSillyTavernBindings ? '重启后仍可命中 ST 绑定续聊。' : '关闭后 ST 绑定只存在当前进程。'}
-                  />
-                </div>
+              <div className="space-y-4">
+                <Subsection eyebrow="Admin Console" title="管理面身份与登录" description="管理面密码、Token TTL、登录目录与登录超时。">
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <FieldBlock label="Admin 密码" description="留空表示不修改现有密码，仅在需要更新时填写。">
+                      <Input
+                        value={form.adminPassword}
+                        onChange={(event) => setForm({ ...form, adminPassword: event.target.value })}
+                        placeholder={adminPasswordSet ? '已设置新密码请填写，留空表示不修改' : '请输入管理面密码'}
+                        className={FIELD_CLASSNAME}
+                      />
+                    </FieldBlock>
+                    <FieldBlock label="Admin Token TTL" description="管理面登录态的有效时长，单位小时。">
+                      <Input type="number" value={form.adminTTL} onChange={(event) => setForm({ ...form, adminTTL: event.target.value })} className={FIELD_CLASSNAME} />
+                    </FieldBlock>
+                    <FieldBlock label="Login Sessions Dir" description="登录态、Probe 和会话文件的持久化目录。">
+                      <Input value={form.loginSessionsDir} onChange={(event) => setForm({ ...form, loginSessionsDir: event.target.value })} className={FIELD_CLASSNAME} />
+                    </FieldBlock>
+                    <FieldBlock label="Login Timeout (sec)" description="验证码登录、刷新等流程的等待超时。">
+                      <Input type="number" value={form.loginTimeoutSec} onChange={(event) => setForm({ ...form, loginTimeoutSec: event.target.value })} className={FIELD_CLASSNAME} />
+                    </FieldBlock>
+                    <FieldBlock label="SQLite Path" description="账号状态和本地会话缓存共用此库文件路径。">
+                      <Input value={form.sqlitePath} onChange={(event) => setForm({ ...form, sqlitePath: event.target.value })} className={FIELD_CLASSNAME} />
+                    </FieldBlock>
+                  </div>
+                </Subsection>
+
+                <Subsection eyebrow="Persistence" title="会话与缓存落盘" description="按需开启对应的本地持久化能力。">
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <ToggleTile
+                      label="本地会话快照"
+                      description="保存会话列表、消息内容和本地对话快照，重启后可恢复到管理面。"
+                      value={form.persistConversationSnapshots}
+                      onChange={(checked) => setForm({ ...form, persistConversationSnapshots: checked })}
+                      hint={form.persistConversationSnapshots ? '重启后会恢复本地会话列表。' : '关闭后仅保留当前进程内的会话快照。'}
+                    />
+                    <ToggleTile
+                      label="Responses 缓存"
+                      description="保存 `/v1/responses/{id}` 依赖的 response 缓存与元数据。"
+                      value={form.persistResponses}
+                      onChange={(checked) => setForm({ ...form, persistResponses: checked })}
+                      hint={form.persistResponses ? '重启后仍可按 response_id 读取缓存。' : '关闭后 response 缓存只存在内存。'}
+                    />
+                    <ToggleTile
+                      label="续聊 Session"
+                      description="保存 thread/config/context 锚点，供 continuation 和 thread 续聊复用。"
+                      value={form.persistContinuationSessions}
+                      onChange={(checked) => setForm({ ...form, persistContinuationSessions: checked })}
+                      hint={form.persistContinuationSessions ? '重启后仍可沿用上游续聊锚点。' : '关闭后续聊锚点不会落盘。'}
+                    />
+                    <ToggleTile
+                      label="ST Binding"
+                      description="保存 SillyTavern 角色档案到 conversation 的绑定关系。"
+                      value={form.persistSillyTavernBindings}
+                      onChange={(checked) => setForm({ ...form, persistSillyTavernBindings: checked })}
+                      hint={form.persistSillyTavernBindings ? '重启后仍可命中 ST 绑定续聊。' : '关闭后 ST 绑定只存在当前进程。'}
+                    />
+                  </div>
+                </Subsection>
               </div>
 
-              <div className={CARD_SURFACE}>
-                <p className="section-eyebrow">Operational Notes</p>
-                <h3 className="mt-2 text-lg font-semibold">部署核对项</h3>
-                <div className="mt-4 grid gap-3">
-                  <div className={TILE_CLASSNAME}>
-                    <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-muted-foreground">密码状态</div>
-                    <div className="mt-2 text-sm font-medium">{adminPasswordSet ? '已存在管理面密码' : '尚未配置管理面密码'}</div>
-                  </div>
-                  <div className={TILE_CLASSNAME}>
-                    <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-muted-foreground">会话目录</div>
-                    <div className="mt-2 text-sm font-medium break-all">{form.loginSessionsDir.trim() || '使用程序默认路径'}</div>
-                  </div>
-                  <div className={TILE_CLASSNAME}>
-                    <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-muted-foreground">持久化建议</div>
-                    <div className="mt-2 text-sm leading-6 text-muted-foreground">
-                      {persistenceEnabled
-                        ? `建议同时挂载会话目录和 SQLite 数据目录；当前已启用 ${persistenceEnabledCount} / 4 项本地会话持久化。`
-                        : '当前只会持久化账号状态；SQLite 不恢复本地会话、response 缓存或续聊锚点。'}
-                    </div>
-                  </div>
+              <Subsection eyebrow="Operational Notes" title="部署核对项" description="快速核对管理面密码、登录目录与持久化覆盖范围。">
+                <div className="grid gap-3">
+                  <MetaTile label="密码状态" value={adminPasswordSet ? '已存在管理面密码' : '尚未配置管理面密码'} />
+                  <MetaTile label="会话目录" value={form.loginSessionsDir.trim() || '使用程序默认路径'} />
+                  <MetaTile
+                    label="持久化建议"
+                    value={
+                      <span className="text-[13px] font-normal leading-6 text-muted-foreground">
+                        {persistenceEnabled
+                          ? `建议同时挂载会话目录和 SQLite 数据目录；当前已启用 ${persistenceEnabledCount} / 4 项本地会话持久化。`
+                          : '当前只会持久化账号状态；SQLite 不恢复本地会话、response 缓存或续聊锚点。'}
+                      </span>
+                    }
+                  />
                 </div>
-              </div>
+              </Subsection>
             </div>
-          </SectionCard>
+          </SectionShell>
 
-          <SectionCard
+          <SectionShell
             id="advanced-json"
+            eyebrow="Advanced"
             title="高级 JSON 与调试输出"
             description="维护调试开关、列表项和结构化 JSON。"
             icon={Bug}
           >
             <div className="grid gap-4 2xl:grid-cols-[minmax(260px,0.9fr)_minmax(0,1.1fr)]">
               <div className="space-y-4">
-                <div className={CARD_SURFACE}>
-                  <p className="section-eyebrow">Debug Switch</p>
-                  <h3 className="mt-2 text-lg font-semibold">调试输出</h3>
-                  <p className="mt-1 text-sm leading-6 text-muted-foreground">仅在排障时开启，方便定位 Host Header、TLS、请求体和上游返回异常。</p>
-                  <div className="mt-5">
-                    <ToggleTile
-                      label="Debug Upstream"
-                      description="记录更详细的上游请求与响应线索，适合排查 502 / 504、TLS、Host Header 和响应体格式问题。"
-                      value={form.debugUpstream}
-                      onChange={(checked) => setForm({ ...form, debugUpstream: checked })}
-                    />
-                  </div>
-                </div>
+                <Subsection eyebrow="Debug Switch" title="调试输出" description="仅在排障时开启，方便定位 Host Header、TLS、请求体和上游返回异常。">
+                  <ToggleTile
+                    label="Debug Upstream"
+                    description="记录更详细的上游请求与响应线索，适合排查 502 / 504、TLS、Host Header 和响应体格式问题。"
+                    value={form.debugUpstream}
+                    onChange={(checked) => setForm({ ...form, debugUpstream: checked })}
+                  />
+                </Subsection>
 
-                <div className={CARD_SURFACE}>
-                  <p className="section-eyebrow">Line Lists</p>
-                  <h3 className="mt-2 text-lg font-semibold">列表型高级配置</h3>
-                  <div className="mt-5 space-y-4">
-                    <FieldBlock label="Search Scopes (每行一个)" description="默认搜索范围，适用于联网或知识域限制。">
-                      <Textarea value={form.searchScopes} onChange={(event) => setForm({ ...form, searchScopes: event.target.value })} className={LINE_TEXTAREA_CLASSNAME} />
-                    </FieldBlock>
-                  </div>
-                </div>
-              </div>
-
-              <div className={CARD_SURFACE}>
-                <p className="section-eyebrow">JSON Blocks</p>
-                <h3 className="mt-2 text-lg font-semibold">结构化高级配置</h3>
-                <p className="mt-1 text-sm leading-6 text-muted-foreground">这些文本区使用统一的深色底 + monospace 风格，便于直接贴 JSON 并快速看出括号层级。</p>
-                <div className="mt-5 grid gap-4">
-                  <FieldBlock label="Model Aliases (JSON)" description="公共模型名到上游模型 ID 的映射。">
-                    <Textarea value={form.modelAliases} onChange={(event) => setForm({ ...form, modelAliases: event.target.value })} className={JSON_TEXTAREA_CLASSNAME} />
+                <Subsection eyebrow="Line Lists" title="列表型高级配置" description="每行一个条目；保存后立即生效。">
+                  <FieldBlock label="Search Scopes" description="默认搜索范围，适用于联网或知识域限制。">
+                    <Textarea value={form.searchScopes} onChange={(event) => setForm({ ...form, searchScopes: event.target.value })} className={LINE_TEXTAREA_CLASSNAME} />
                   </FieldBlock>
-                </div>
+                </Subsection>
               </div>
+
+              <Subsection eyebrow="JSON Blocks" title="结构化高级配置" description="统一深色 + monospace 编辑区，便于直接贴 JSON。">
+                <FieldBlock label="Model Aliases (JSON)" description="公共模型名到上游模型 ID 的映射。">
+                  <Textarea value={form.modelAliases} onChange={(event) => setForm({ ...form, modelAliases: event.target.value })} className={JSON_TEXTAREA_CLASSNAME} />
+                </FieldBlock>
+              </Subsection>
             </div>
-          </SectionCard>
+          </SectionShell>
         </div>
 
-        <div className="pretty-scroll min-w-0 space-y-6 self-start xl:sticky xl:top-6 xl:max-h-[calc(100vh-3rem)] xl:overflow-y-auto xl:pr-1">
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="application/json"
-            className="hidden"
-            onChange={async (event) => {
-              const file = event.target.files?.[0];
-              if (!file) return;
-              try {
-                setMessage('导入配置中...');
-                const raw = await file.text();
-                const parsed = JSON.parse(raw);
-                const imported = (parsed?.config || parsed) as JsonResult;
-                const payload = await onImport(imported);
-                setOutput(JSON.stringify(payload, null, 2));
-                setMessage('配置已导入: ' + file.name);
-                toast.success('配置导入成功');
-              } catch (error) {
-                const text = error instanceof Error ? error.message : '导入失败';
-                setMessage(text);
-                toast.error(text);
-              } finally {
-                event.currentTarget.value = '';
-              }
-            }}
-          />
-          <input
-            ref={promptStrategyFileInputRef}
-            type="file"
-            accept="application/json"
-            className="hidden"
-            onChange={async (event) => {
-              const file = event.target.files?.[0];
-              if (!file) return;
-              try {
-                setMessage('导入策略中...');
-                const raw = await file.text();
-                const parsed = JSON.parse(raw);
-                const prompt = (parsed?.prompt || parsed) as PromptConfig;
-                applyPromptStrategy(prompt);
-                setOutput(JSON.stringify(prompt, null, 2));
-                setMessage('已载入策略文件: ' + file.name);
-                toast.success('策略已导入到编辑器');
-              } catch (error) {
-                const text = error instanceof Error ? error.message : '策略导入失败';
-                setMessage(text);
-                toast.error(text);
-              } finally {
-                event.currentTarget.value = '';
-              }
-            }}
-          />
+        {/* Sticky right rail with section nav, ops checklist, file/snapshot actions, and JSON output. */}
+        <aside className="pretty-scroll min-w-0 space-y-5 self-start xl:sticky xl:top-6 xl:max-h-[calc(100vh-3rem)] xl:overflow-y-auto xl:pr-1">
+          <SectionNav activeId={activeSection} onJump={setActiveSection} />
 
           <InfoCard title="部署核对" description="关键运行项。">
             <div className="grid gap-3">
               {sidebarHighlights.map((item) => (
-                <div key={item.label} className={TILE_CLASSNAME}>
-                  <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-muted-foreground">{item.label}</div>
-                  <div className="mt-2 text-sm font-medium break-all">{item.value}</div>
-                </div>
+                <MetaTile key={item.label} label={item.label} value={item.value} />
               ))}
             </div>
           </InfoCard>
 
-          <InfoCard title="配置文件" description="导入或导出 config。">
-            <div className="grid gap-3">
-              <Button variant="outline" className="justify-start" onClick={() => fileInputRef.current?.click()}>
-                <Upload className="size-4" />
-                导入配置
-              </Button>
-              <Button
-                variant="outline"
-                className="justify-start"
-                onClick={async () => {
-                  try {
-                    setMessage('导出配置中...');
-                    const payload = await onExport();
-                    setOutput(JSON.stringify(payload, null, 2));
-                    setMessage('配置已导出到下方');
-                  } catch (error) {
-                    const text = error instanceof Error ? error.message : '导出失败';
-                    setMessage(text);
-                    toast.error(text);
-                  }
-                }}
-              >
-                <Download className="size-4" />
-                导出配置
-              </Button>
-            </div>
-          </InfoCard>
+          <InfoCard
+            title="配置文件 / 快照"
+            description="导入、导出、生成与读取配置快照。"
+          >
+            <div className="grid gap-4">
+              <div className="grid gap-2">
+                <div className="section-eyebrow">Config File</div>
+                <Button variant="outline" className="justify-start" onClick={() => fileInputRef.current?.click()}>
+                  <Upload className="size-4" />
+                  导入配置
+                </Button>
+                <Button
+                  variant="outline"
+                  className="justify-start"
+                  onClick={async () => {
+                    try {
+                      setMessage('导出配置中...');
+                      const payload = await onExport();
+                      setOutput(JSON.stringify(payload, null, 2));
+                      setMessage('配置已导出到下方');
+                    } catch (error) {
+                      const text = error instanceof Error ? error.message : '导出失败';
+                      setMessage(text);
+                      toast.error(text);
+                    }
+                  }}
+                >
+                  <Download className="size-4" />
+                  导出配置
+                </Button>
+              </div>
 
-          <InfoCard title="配置快照" description="生成或读取快照。">
-            <div className="grid gap-3">
-              <Button
-                variant="outline"
-                className="justify-start"
-                onClick={async () => {
-                  try {
-                    setMessage('生成快照中...');
-                    const payload = await onCreateSnapshot();
-                    setOutput(JSON.stringify(payload, null, 2));
-                    setMessage('配置快照已生成');
-                  } catch (error) {
-                    const text = error instanceof Error ? error.message : '快照生成失败';
-                    setMessage(text);
-                    toast.error(text);
-                  }
-                }}
-              >
-                <WandSparkles className="size-4" />
-                生成快照
-              </Button>
-              <Button
-                variant="outline"
-                className="justify-start"
-                onClick={async () => {
-                  try {
-                    setMessage('读取快照列表中...');
-                    const payload = await onListSnapshot();
-                    setOutput(JSON.stringify(payload, null, 2));
-                    setMessage('快照列表已刷新');
-                  } catch (error) {
-                    const text = error instanceof Error ? error.message : '读取快照失败';
-                    setMessage(text);
-                    toast.error(text);
-                  }
-                }}
-              >
-                查看快照
-              </Button>
+              <div className="grid gap-2">
+                <div className="section-eyebrow">Snapshots</div>
+                <Button
+                  variant="outline"
+                  className="justify-start"
+                  onClick={async () => {
+                    try {
+                      setMessage('生成快照中...');
+                      const payload = await onCreateSnapshot();
+                      setOutput(JSON.stringify(payload, null, 2));
+                      setMessage('配置快照已生成');
+                    } catch (error) {
+                      const text = error instanceof Error ? error.message : '快照生成失败';
+                      setMessage(text);
+                      toast.error(text);
+                    }
+                  }}
+                >
+                  <WandSparkles className="size-4" />
+                  生成快照
+                </Button>
+                <Button
+                  variant="outline"
+                  className="justify-start"
+                  onClick={async () => {
+                    try {
+                      setMessage('读取快照列表中...');
+                      const payload = await onListSnapshot();
+                      setOutput(JSON.stringify(payload, null, 2));
+                      setMessage('快照列表已刷新');
+                    } catch (error) {
+                      const text = error instanceof Error ? error.message : '读取快照失败';
+                      setMessage(text);
+                      toast.error(text);
+                    }
+                  }}
+                >
+                  <Server className="size-4" />
+                  查看快照
+                </Button>
+              </div>
             </div>
           </InfoCard>
 
           <JsonPreview title="配置输出" value={output} onCopy={() => void copyText(output)} minHeight={420} />
-        </div>
+        </aside>
       </div>
     </div>
   );
 }
 
-
+export type _SettingsPanelSectionIcon = ComponentType<{ className?: string }>;

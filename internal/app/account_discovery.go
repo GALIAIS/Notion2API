@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"strings"
 )
 
@@ -134,8 +133,8 @@ func parseLoadUserContentMetadata(payload map[string]any) discoveredAccountMetad
 	return meta
 }
 
-func fetchLoadUserContentMetadata(ctx context.Context, client *http.Client, upstream NotionUpstream, clientVersion string, activeUserID string) (discoveredAccountMetadata, error) {
-	payload, err := postNotionLoginJSON(ctx, client, upstream, upstream.API("loadUserContent"), clientVersion, upstream.HomeURL(), activeUserID, map[string]any{})
+func fetchLoadUserContentMetadata(ctx context.Context, session *loginHTTPSession, upstream NotionUpstream, clientVersion string, activeUserID string) (discoveredAccountMetadata, error) {
+	payload, err := postNotionLoginJSON(ctx, session, upstream, upstream.API("loadUserContent"), clientVersion, upstream.HomeURL(), activeUserID, map[string]any{})
 	if err != nil {
 		return discoveredAccountMetadata{}, err
 	}
@@ -146,8 +145,8 @@ func fetchLoadUserContentMetadata(ctx context.Context, client *http.Client, upst
 	return meta, nil
 }
 
-func fetchAvailableModelsMetadata(ctx context.Context, client *http.Client, upstream NotionUpstream, clientVersion string, activeUserID string) ([]ModelDefinition, error) {
-	payload, err := postNotionLoginJSON(ctx, client, upstream, upstream.API("getAvailableModels"), clientVersion, upstream.HomeURL(), activeUserID, map[string]any{})
+func fetchAvailableModelsMetadata(ctx context.Context, session *loginHTTPSession, upstream NotionUpstream, clientVersion string, activeUserID string) ([]ModelDefinition, error) {
+	payload, err := postNotionLoginJSON(ctx, session, upstream, upstream.API("getAvailableModels"), clientVersion, upstream.HomeURL(), activeUserID, map[string]any{})
 	if err != nil {
 		return nil, err
 	}
@@ -158,22 +157,23 @@ func fetchAvailableModelsMetadata(ctx context.Context, client *http.Client, upst
 	return parseProbeModelsBlob(string(raw)), nil
 }
 
-func discoverImportedAccountMetadata(ctx context.Context, cfg AppConfig, cookies []ProbeCookie, fallback discoveredAccountMetadata) (discoveredAccountMetadata, error) {
+func discoverImportedAccountMetadata(ctx context.Context, cfg AppConfig, accountEmail string, cookies []ProbeCookie, fallback discoveredAccountMetadata) (discoveredAccountMetadata, error) {
 	meta := fallback
 	cookies = normalizeProbeCookies(cookies)
 	if len(cookies) == 0 {
 		return meta, fmt.Errorf("cookies are required for auto-discovery")
 	}
 	upstream := cfg.NotionUpstream()
-	client, err := newNotionLoginHTTPClient(helperTimeout(cfg), upstream)
+	resolver := NewProxyResolver(cfg)
+	session, err := newNotionLoginSession(helperTimeout(cfg), upstream, resolver, accountEmail)
 	if err != nil {
 		return meta, err
 	}
-	restoreProbeCookies(client.Jar, upstream.HomeURL(), cookies)
-	restoreProbeCookies(client.Jar, upstream.LoginURL(), cookies)
+	restoreProbeCookies(session.Jar, upstream.HomeURL(), cookies)
+	restoreProbeCookies(session.Jar, upstream.LoginURL(), cookies)
 
 	if strings.TrimSpace(meta.ClientVersion) == "" {
-		bootstrap, err := fetchLoginBootstrap(ctx, client, upstream)
+		bootstrap, err := fetchLoginBootstrap(ctx, session, upstream)
 		if err != nil {
 			return meta, err
 		}
@@ -183,13 +183,13 @@ func discoverImportedAccountMetadata(ctx context.Context, cfg AppConfig, cookies
 	lookupUserID := firstNonEmpty(
 		meta.UserID,
 		probeCookieValue(cookies, "notion_user_id"),
-		probeCookieValue(probeCookiesFromJar(client.Jar, upstream.HomeURL()), "notion_user_id"),
-		probeCookieValue(probeCookiesFromJar(client.Jar, upstream.LoginURL()), "notion_user_id"),
+		probeCookieValue(probeCookiesFromJar(session.Jar, upstream.HomeURL()), "notion_user_id"),
+		probeCookieValue(probeCookiesFromJar(session.Jar, upstream.LoginURL()), "notion_user_id"),
 	)
 
 	var primaryErr error
 	if strings.TrimSpace(meta.ClientVersion) != "" {
-		discovered, err := fetchLoadUserContentMetadata(ctx, client, upstream, meta.ClientVersion, lookupUserID)
+		discovered, err := fetchLoadUserContentMetadata(ctx, session, upstream, meta.ClientVersion, lookupUserID)
 		if err == nil {
 			meta.Email = firstNonEmpty(meta.Email, discovered.Email)
 			meta.UserID = firstNonEmpty(meta.UserID, discovered.UserID)
@@ -206,7 +206,7 @@ func discoverImportedAccountMetadata(ctx context.Context, cfg AppConfig, cookies
 
 	if strings.TrimSpace(meta.UserID) == "" || strings.TrimSpace(meta.SpaceID) == "" || strings.TrimSpace(meta.Email) == "" {
 		if strings.TrimSpace(meta.ClientVersion) != "" && strings.TrimSpace(lookupUserID) != "" {
-			bootstrap, err := getSpacesInitial(ctx, client, upstream, meta.ClientVersion, lookupUserID)
+			bootstrap, err := getSpacesInitial(ctx, session, upstream, meta.ClientVersion, lookupUserID)
 			if err == nil {
 				meta.UserID = firstNonEmpty(meta.UserID, lookupUserID)
 				meta.Email = firstNonEmpty(meta.Email, bootstrap.Email)
@@ -220,7 +220,7 @@ func discoverImportedAccountMetadata(ctx context.Context, cfg AppConfig, cookies
 	}
 
 	if strings.TrimSpace(meta.ClientVersion) != "" {
-		if models, err := fetchAvailableModelsMetadata(ctx, client, upstream, meta.ClientVersion, firstNonEmpty(meta.UserID, lookupUserID)); err == nil {
+		if models, err := fetchAvailableModelsMetadata(ctx, session, upstream, meta.ClientVersion, firstNonEmpty(meta.UserID, lookupUserID)); err == nil {
 			meta.Models = models
 		}
 	}

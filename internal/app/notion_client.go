@@ -13,6 +13,7 @@ import (
 	"log"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -369,6 +370,8 @@ func (e *notionAPIError) Error() string {
 type NotionAIClient struct {
 	Session                     SessionInfo
 	Config                      AppConfig
+	AccountEmail                string
+	ProxyResolver               *ProxyResolver
 	Timeout                     time.Duration
 	PollInterval                time.Duration
 	PollMaxRounds               int
@@ -612,24 +615,40 @@ func (c *NotionAIClient) ensureSessionLiveMetadata(ctx context.Context) {
 	_ = c.persistSessionProbe()
 }
 
-func newNotionAIClient(session SessionInfo, cfg AppConfig) *NotionAIClient {
-	return newNotionAIClientWithMode(session, cfg, false)
+func newNotionAIClient(session SessionInfo, cfg AppConfig, accountEmail string) *NotionAIClient {
+	return newNotionAIClientWithMode(session, cfg, accountEmail, false)
 }
 
-func newNotionAIStreamingClient(session SessionInfo, cfg AppConfig) *NotionAIClient {
-	return newNotionAIClientWithMode(session, cfg, true)
+func newNotionAIStreamingClient(session SessionInfo, cfg AppConfig, accountEmail string) *NotionAIClient {
+	return newNotionAIClientWithMode(session, cfg, accountEmail, true)
 }
 
-func newNotionAIClientWithMode(session SessionInfo, cfg AppConfig, streaming bool) *NotionAIClient {
+func newNotionAIClientWithMode(session SessionInfo, cfg AppConfig, accountEmail string, streaming bool) *NotionAIClient {
 	normalizedCfg := normalizeConfig(cfg)
+	resolver := NewProxyResolver(normalizedCfg)
 	upstream := normalizedCfg.NotionUpstream()
 	tlsConfig := &tls.Config{InsecureSkipVerify: true}
 	if strings.TrimSpace(upstream.TLSServerName) != "" {
 		tlsConfig.ServerName = strings.TrimSpace(upstream.TLSServerName)
 	}
+	proxyFunc := upstream.ProxyFunc()
 	transport := &http.Transport{
 		TLSClientConfig: tlsConfig,
-		Proxy:           upstream.ProxyFunc(),
+		Proxy: func(req *http.Request) (*url.URL, error) {
+			if resolver != nil {
+				proxyURL, _, err := resolver.ResolveProxyForRequest(accountEmail, req.URL)
+				if err != nil {
+					return nil, err
+				}
+				if proxyURL != nil {
+					return proxyURL, nil
+				}
+			}
+			if proxyFunc == nil {
+				return nil, nil
+			}
+			return proxyFunc(req)
+		},
 	}
 	timeout := requestTimeout(normalizedCfg)
 	clientTimeout := timeout
@@ -640,6 +659,8 @@ func newNotionAIClientWithMode(session SessionInfo, cfg AppConfig, streaming boo
 	return &NotionAIClient{
 		Session:       session,
 		Config:        normalizedCfg,
+		AccountEmail:  strings.TrimSpace(accountEmail),
+		ProxyResolver: resolver,
 		Timeout:       timeout,
 		PollInterval:  time.Duration(maxFloat(normalizedCfg.PollIntervalSec, 0.5) * float64(time.Second)),
 		PollMaxRounds: maxInt(normalizedCfg.PollMaxRounds, 1),
@@ -959,7 +980,6 @@ func (c *NotionAIClient) postJSONResponseWithReferer(ctx context.Context, url st
 	if strings.TrimSpace(contentType) == "" {
 		contentType = "application/json"
 	}
-	requestContentType := "application/json"
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
@@ -983,8 +1003,18 @@ func (c *NotionAIClient) postJSONResponseWithReferer(ctx context.Context, url st
 		}
 		req.Header.Set(key, value)
 	}
-	req.Header.Set("content-type", requestContentType)
-	c.captureDebugUpstreamRequest(url, headers, payload, body)
+	req.Header.Set("content-type", "application/json")
+	if c.ProxyResolver != nil {
+		if _, extraHeaders, resolveErr := c.ProxyResolver.ResolveProxyForRequest(c.AccountEmail, req.URL); resolveErr == nil {
+			for key, value := range extraHeaders {
+				if strings.TrimSpace(key) == "" || strings.TrimSpace(value) == "" {
+					continue
+				}
+				req.Header.Set(key, value)
+			}
+		}
+	}
+	c.captureDebugUpstreamRequestFromHeader(url, req.Header, payload, body)
 	c.Config.NotionUpstream().ApplyHost(req)
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
@@ -1169,6 +1199,17 @@ func (c *NotionAIClient) captureDebugUpstreamRequest(url string, headers map[str
 	} else if err := os.WriteFile(metaPath, metaBytes, 0o600); err != nil {
 		log.Printf("[debug_upstream] write request meta failed: %v", err)
 	}
+}
+
+func (c *NotionAIClient) captureDebugUpstreamRequestFromHeader(url string, header http.Header, payload map[string]any, body []byte) {
+	headers := map[string]string{}
+	for key, values := range header {
+		if len(values) == 0 {
+			continue
+		}
+		headers[strings.ToLower(strings.TrimSpace(key))] = strings.TrimSpace(values[0])
+	}
+	c.captureDebugUpstreamRequest(url, headers, payload, body)
 }
 
 func isoNowMillis() string {

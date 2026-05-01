@@ -41,3 +41,8 @@ frontend/out/
 *.spec.tsx
 __tests__/
 WEBUI_DEVELOPMENT_GUIDE.md
+
+# Rust FFI build artifacts (v2 wreq-ffi)
+wreq-ffi/target/
+wreq-ffi/include/wreq_ffi.h
+wreq-ffi/Cargo.lock

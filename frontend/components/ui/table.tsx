@@ -23,7 +23,7 @@ function TableHeader({ className, ...props }: React.ComponentProps<'thead'>) {
   return (
     <thead
       data-slot="table-header"
-      className={cn('[&_tr]:border-b', className)}
+      className={cn('bg-[color-mix(in_oklab,var(--muted)_55%,var(--card))] [&_tr]:border-b [&_tr]:border-border/60', className)}
       {...props}
     />
   );
@@ -60,7 +60,7 @@ const TableRow = React.forwardRef<
     ref={ref}
     data-slot="table-row"
     className={cn(
-      'hover:bg-muted/50 data-[state=selected]:bg-muted border-b transition-colors',
+      'border-b border-border/60 transition-colors hover:bg-[color-mix(in_oklab,var(--primary)_5%,var(--card))] data-[state=selected]:bg-[color-mix(in_oklab,var(--primary)_8%,var(--card))]',
       className,
     )}
     {...props}
@@ -73,7 +73,7 @@ function TableHead({ className, ...props }: React.ComponentProps<'th'>) {
     <th
       data-slot="table-head"
       className={cn(
-        'text-foreground h-9 px-2 text-left align-middle text-[13px] font-medium whitespace-nowrap [&:has([role=checkbox])]:pr-0 [&>[role=checkbox]]:translate-y-[2px]',
+        'text-muted-foreground h-10 px-3 text-left align-middle text-[11px] font-semibold uppercase tracking-[0.08em] whitespace-nowrap [&:has([role=checkbox])]:pr-0 [&>[role=checkbox]]:translate-y-[2px]',
         className,
       )}
       {...props}

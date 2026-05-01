@@ -223,6 +223,7 @@ func (s *ServerState) startAutoRelogin(ctx context.Context, cfg AppConfig, accou
 		ProfileDir:       account.ProfileDir,
 		PendingPath:      account.PendingStatePath,
 		StorageStatePath: account.StorageStatePath,
+		AccountEmail:     account.Email,
 	})
 	account = mergeAccountWithStatus(cfg, account, status)
 	account = markAccountReloginPending(account, now)
@@ -236,13 +237,13 @@ func (s *ServerState) startAutoRelogin(ctx context.Context, cfg AppConfig, accou
 	return cfg, fmt.Errorf("verification code required for %s; auto relogin started (%s)", account.Email, reason)
 }
 
-func (a *App) runPromptWithSession(ctx context.Context, cfg AppConfig, session SessionInfo, request PromptRunRequest, onDelta func(string) error) (InferenceResult, error) {
+func (a *App) runPromptWithSession(ctx context.Context, cfg AppConfig, session SessionInfo, accountEmail string, request PromptRunRequest, onDelta func(string) error) (InferenceResult, error) {
 	if a.runPromptWithSessionOverride != nil {
 		return a.runPromptWithSessionOverride(ctx, cfg, session, request, onDelta)
 	}
-	client := newNotionAIClient(session, cfg)
+	client := newNotionAIClient(session, cfg, accountEmail)
 	if onDelta != nil {
-		client = newNotionAIStreamingClient(session, cfg)
+		client = newNotionAIStreamingClient(session, cfg, accountEmail)
 	}
 	execute := func(ctx context.Context, current PromptRunRequest, forward func(string) error) (InferenceResult, error) {
 		if forward == nil {
@@ -253,16 +254,16 @@ func (a *App) runPromptWithSession(ctx context.Context, cfg AppConfig, session S
 	return execute(ctx, request, onDelta)
 }
 
-func (a *App) runPromptWithSessionWithSink(ctx context.Context, cfg AppConfig, session SessionInfo, request PromptRunRequest, sink InferenceStreamSink) (InferenceResult, error) {
+func (a *App) runPromptWithSessionWithSink(ctx context.Context, cfg AppConfig, session SessionInfo, accountEmail string, request PromptRunRequest, sink InferenceStreamSink) (InferenceResult, error) {
 	if a.runPromptWithSessionSinkOverride != nil {
 		return a.runPromptWithSessionSinkOverride(ctx, cfg, session, request, sink)
 	}
 	if a.runPromptWithSessionOverride != nil {
 		return a.runPromptWithSessionOverride(ctx, cfg, session, request, sink.Text)
 	}
-	client := newNotionAIStreamingClient(session, cfg)
+	client := newNotionAIStreamingClient(session, cfg, accountEmail)
 	if sink.Text == nil && sink.Reasoning == nil && sink.ReasoningWarmup == nil && sink.KeepAlive == nil {
-		client = newNotionAIClient(session, cfg)
+		client = newNotionAIClient(session, cfg, accountEmail)
 	}
 	if sink.Reasoning != nil || sink.ReasoningWarmup != nil || sink.KeepAlive != nil {
 		return client.RunPromptStreamWithSink(ctx, request, sink)

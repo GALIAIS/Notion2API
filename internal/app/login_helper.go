@@ -3,11 +3,9 @@ package app
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"net/http/cookiejar"
@@ -29,6 +27,7 @@ type LoginStartRequest struct {
 	ProfileDir       string
 	PendingPath      string
 	StorageStatePath string
+	AccountEmail     string
 }
 
 type LoginVerifyRequest struct {
@@ -38,6 +37,7 @@ type LoginVerifyRequest struct {
 	PendingPath      string
 	StorageStatePath string
 	ProbePath        string
+	AccountEmail     string
 }
 
 type loginStorageState struct {
@@ -162,22 +162,17 @@ func writeLoginStorageState(path string, payload loginStorageState) error {
 	return writePrettyJSONFile(path, payload)
 }
 
-func newNotionLoginHTTPClient(timeout time.Duration, upstream NotionUpstream) (*http.Client, error) {
+func newNotionLoginSession(timeout time.Duration, upstream NotionUpstream, resolver *ProxyResolver, accountEmail string) (*loginHTTPSession, error) {
 	jar, err := cookiejar.New(nil)
 	if err != nil {
 		return nil, err
 	}
-	tlsConfig := &tls.Config{InsecureSkipVerify: true}
-	if strings.TrimSpace(upstream.TLSServerName) != "" {
-		tlsConfig.ServerName = strings.TrimSpace(upstream.TLSServerName)
-	}
-	return &http.Client{
-		Timeout: timeout,
-		Jar:     jar,
-		Transport: &http.Transport{
-			TLSClientConfig: tlsConfig,
-			Proxy:           upstream.ProxyFunc(),
-		},
+	return &loginHTTPSession{
+		Client:        &http.Client{Timeout: timeout, Jar: jar},
+		ProxyResolver: resolver,
+		AccountEmail:  strings.TrimSpace(accountEmail),
+		Timeout:       timeout,
+		Upstream:      upstream,
 	}, nil
 }
 
@@ -347,27 +342,21 @@ func loginJSONError(targetURL string, status int, body []byte, headers http.Head
 	return apiErr
 }
 
-func fetchLoginBootstrap(ctx context.Context, client *http.Client, upstream NotionUpstream) (loginBootstrap, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, upstream.LoginURL(), nil)
+func fetchLoginBootstrap(ctx context.Context, session *loginHTTPSession, upstream NotionUpstream) (loginBootstrap, error) {
+	headers := map[string]string{
+		"accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+		"accept-language": "zh-CN,zh;q=0.9",
+		"user-agent":      notionLoginUA,
+	}
+	status, respHeaders, body, err := loginWreqDoRequest(ctx, session, http.MethodGet, upstream.LoginURL(), headers, nil)
 	if err != nil {
 		return loginBootstrap{}, err
 	}
-	req.Header.Set("accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-	req.Header.Set("accept-language", "zh-CN,zh;q=0.9")
-	req.Header.Set("user-agent", notionLoginUA)
-	upstream.ApplyHost(req)
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return loginBootstrap{}, err
+	if len(body) > 2*1024*1024 {
+		body = body[:2*1024*1024]
 	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
-	if err != nil {
-		return loginBootstrap{}, err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return loginBootstrap{}, loginJSONError(upstream.LoginURL(), resp.StatusCode, body, resp.Header)
+	if status < 200 || status >= 300 {
+		return loginBootstrap{}, loginJSONError(upstream.LoginURL(), status, body, respHeaders)
 	}
 
 	clientVersion := ""
@@ -378,7 +367,7 @@ func fetchLoginBootstrap(ctx context.Context, client *http.Client, upstream Noti
 		return loginBootstrap{}, fmt.Errorf("login page missing data-notion-version")
 	}
 
-	cookies := probeCookiesFromJar(client.Jar, upstream.LoginURL())
+	cookies := probeCookiesFromJar(session.Jar, upstream.LoginURL())
 	deviceID := firstNonEmpty(
 		probeCookieValue(cookies, "notion_browser_id"),
 		probeCookieValue(cookies, "device_id"),
@@ -390,47 +379,41 @@ func fetchLoginBootstrap(ctx context.Context, client *http.Client, upstream Noti
 	}, nil
 }
 
-func postNotionLoginJSON(ctx context.Context, client *http.Client, upstream NotionUpstream, targetURL string, clientVersion string, referer string, activeUserID string, payload any) (map[string]any, error) {
+func postNotionLoginJSON(ctx context.Context, session *loginHTTPSession, upstream NotionUpstream, targetURL string, clientVersion string, referer string, activeUserID string, payload any) (map[string]any, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body))
+	headers := map[string]string{
+		"accept":                      "application/json",
+		"accept-language":             "zh-CN",
+		"content-type":                "application/json",
+		"origin":                      upstream.OriginURL,
+		"referer":                     firstNonEmpty(referer, upstream.LoginURL()),
+		"user-agent":                  notionLoginUA,
+		"notion-client-version":       clientVersion,
+		"notion-audit-log-platform":   "web",
+		"x-notion-active-user-header": strings.TrimSpace(activeUserID),
+	}
+	status, respHeaders, respBody, err := loginWreqDoRequest(ctx, session, http.MethodPost, targetURL, headers, body)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("accept", "application/json")
-	req.Header.Set("accept-language", "zh-CN")
-	req.Header.Set("content-type", "application/json")
-	req.Header.Set("origin", upstream.OriginURL)
-	req.Header.Set("referer", firstNonEmpty(referer, upstream.LoginURL()))
-	req.Header.Set("user-agent", notionLoginUA)
-	req.Header.Set("notion-client-version", clientVersion)
-	req.Header.Set("notion-audit-log-platform", "web")
-	req.Header.Set("x-notion-active-user-header", strings.TrimSpace(activeUserID))
-	upstream.ApplyHost(req)
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
+	if len(respBody) > 2*1024*1024 {
+		respBody = respBody[:2*1024*1024]
 	}
-	defer resp.Body.Close()
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, loginJSONError(targetURL, resp.StatusCode, respBody, resp.Header)
+	if status < 200 || status >= 300 {
+		return nil, loginJSONError(targetURL, status, respBody, respHeaders)
 	}
 	if len(bytes.TrimSpace(respBody)) == 0 {
 		return map[string]any{}, nil
 	}
-	if htmlSummary := summarizeHTMLLikeBody(respBody, resp.Header); htmlSummary != "" {
+	if htmlSummary := summarizeHTMLLikeBody(respBody, respHeaders); htmlSummary != "" {
 		return nil, &notionLoginAPIError{
 			URL:        targetURL,
-			StatusCode: resp.StatusCode,
+			StatusCode: status,
 			Message:    htmlSummary,
-			RetryAfter: parseRetryAfter(resp.Header),
+			RetryAfter: parseRetryAfter(respHeaders),
 		}
 	}
 	var decoded map[string]any
@@ -440,8 +423,8 @@ func postNotionLoginJSON(ctx context.Context, client *http.Client, upstream Noti
 	return decoded, nil
 }
 
-func getLoginOptions(ctx context.Context, client *http.Client, upstream NotionUpstream, email string, clientVersion string) (string, error) {
-	payload, err := postNotionLoginJSON(ctx, client, upstream, upstream.API("getLoginOptions"), clientVersion, upstream.LoginURL(), "", map[string]any{
+func getLoginOptions(ctx context.Context, session *loginHTTPSession, upstream NotionUpstream, email string, clientVersion string) (string, error) {
+	payload, err := postNotionLoginJSON(ctx, session, upstream, upstream.API("getLoginOptions"), clientVersion, upstream.LoginURL(), "", map[string]any{
 		"email":                strings.TrimSpace(email),
 		"requireWorkTypeEmail": false,
 	})
@@ -455,10 +438,10 @@ func getLoginOptions(ctx context.Context, client *http.Client, upstream NotionUp
 	return token, nil
 }
 
-func sendTemporaryPassword(ctx context.Context, client *http.Client, upstream NotionUpstream, email string, clientVersion string, loginOptionsToken string, deviceID string) (string, error) {
+func sendTemporaryPassword(ctx context.Context, session *loginHTTPSession, upstream NotionUpstream, email string, clientVersion string, loginOptionsToken string, deviceID string) (string, error) {
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
-		payload, err := postNotionLoginJSON(ctx, client, upstream, upstream.API("sendTemporaryPassword"), clientVersion, upstream.LoginURL(), "", map[string]any{
+		payload, err := postNotionLoginJSON(ctx, session, upstream, upstream.API("sendTemporaryPassword"), clientVersion, upstream.LoginURL(), "", map[string]any{
 			"email":              strings.TrimSpace(email),
 			"disableLoginLink":   false,
 			"native":             false,
@@ -501,8 +484,8 @@ func sendTemporaryPassword(ctx context.Context, client *http.Client, upstream No
 	return "", lastErr
 }
 
-func loginWithEmail(ctx context.Context, client *http.Client, upstream NotionUpstream, clientVersion string, csrfState string, code string) (string, error) {
-	payload, err := postNotionLoginJSON(ctx, client, upstream, upstream.API("loginWithEmail"), clientVersion, upstream.LoginURL(), "", map[string]any{
+func loginWithEmail(ctx context.Context, session *loginHTTPSession, upstream NotionUpstream, clientVersion string, csrfState string, code string) (string, error) {
+	payload, err := postNotionLoginJSON(ctx, session, upstream, upstream.API("loginWithEmail"), clientVersion, upstream.LoginURL(), "", map[string]any{
 		"state":            strings.TrimSpace(csrfState),
 		"password":         strings.TrimSpace(code),
 		"loginRouteOrigin": "login",
@@ -543,8 +526,8 @@ func parseSpacesInitial(payload map[string]any, userID string) loginSpaceBootstr
 	}
 }
 
-func getSpacesInitial(ctx context.Context, client *http.Client, upstream NotionUpstream, clientVersion string, userID string) (loginSpaceBootstrap, error) {
-	payload, err := postNotionLoginJSON(ctx, client, upstream, upstream.API("getSpacesInitial"), clientVersion, upstream.HomeURL(), userID, map[string]any{})
+func getSpacesInitial(ctx context.Context, session *loginHTTPSession, upstream NotionUpstream, clientVersion string, userID string) (loginSpaceBootstrap, error) {
+	payload, err := postNotionLoginJSON(ctx, session, upstream, upstream.API("getSpacesInitial"), clientVersion, upstream.HomeURL(), userID, map[string]any{})
 	if err != nil {
 		return loginSpaceBootstrap{}, err
 	}
@@ -628,22 +611,23 @@ func StartEmailLogin(ctx context.Context, cfg AppConfig, req LoginStartRequest) 
 	ctx, cancel := helperContext(ctx, cfg)
 	defer cancel()
 	upstream := cfg.NotionUpstream()
+	resolver := NewProxyResolver(cfg)
 
-	client, err := newNotionLoginHTTPClient(helperTimeout(cfg), upstream)
+	session, err := newNotionLoginSession(helperTimeout(cfg), upstream, resolver, firstNonEmpty(req.AccountEmail, req.Email))
 	if err != nil {
 		return failLoginState(req.PendingPath, state, err)
 	}
 
-	bootstrap, err := fetchLoginBootstrap(ctx, client, upstream)
+	bootstrap, err := fetchLoginBootstrap(ctx, session, upstream)
 	if err != nil {
 		return failLoginState(req.PendingPath, state, wrapLoginStageError(cfg, upstream, "fetch login bootstrap", err))
 	}
 
-	loginOptionsToken, err := getLoginOptions(ctx, client, upstream, req.Email, bootstrap.ClientVersion)
+	loginOptionsToken, err := getLoginOptions(ctx, session, upstream, req.Email, bootstrap.ClientVersion)
 	if err != nil {
 		return failLoginState(req.PendingPath, state, wrapLoginStageError(cfg, upstream, "get login options", err))
 	}
-	csrfState, err := sendTemporaryPassword(ctx, client, upstream, req.Email, bootstrap.ClientVersion, loginOptionsToken, bootstrap.DeviceID)
+	csrfState, err := sendTemporaryPassword(ctx, session, upstream, req.Email, bootstrap.ClientVersion, loginOptionsToken, bootstrap.DeviceID)
 	if err != nil {
 		return failLoginState(req.PendingPath, state, wrapLoginStageError(cfg, upstream, "request verification code", err))
 	}
@@ -651,7 +635,7 @@ func StartEmailLogin(ctx context.Context, cfg AppConfig, req LoginStartRequest) 
 	storage := loginStorageState{
 		Email:         strings.TrimSpace(req.Email),
 		ClientVersion: bootstrap.ClientVersion,
-		Cookies:       probeCookiesFromJar(client.Jar, upstream.LoginURL()),
+		Cookies:       probeCookiesFromJar(session.Jar, upstream.LoginURL()),
 	}
 	if err := writeLoginStorageState(req.StorageStatePath, storage); err != nil {
 		return failLoginState(req.PendingPath, state, err)
@@ -696,12 +680,13 @@ func VerifyEmailLogin(ctx context.Context, cfg AppConfig, req LoginVerifyRequest
 	ctx, cancel := helperContext(ctx, cfg)
 	defer cancel()
 	upstream := cfg.NotionUpstream()
+	resolver := NewProxyResolver(cfg)
 
-	client, err := newNotionLoginHTTPClient(helperTimeout(cfg), upstream)
+	session, err := newNotionLoginSession(helperTimeout(cfg), upstream, resolver, firstNonEmpty(req.AccountEmail, req.Email))
 	if err != nil {
 		return failLoginState(req.PendingPath, pending, err)
 	}
-	restoreProbeCookies(client.Jar, upstream.LoginURL(), storage.Cookies)
+	restoreProbeCookies(session.Jar, upstream.LoginURL(), storage.Cookies)
 
 	clientVersion := firstNonEmpty(pending.ClientVersion, storage.ClientVersion)
 	if clientVersion == "" {
@@ -711,25 +696,25 @@ func VerifyEmailLogin(ctx context.Context, cfg AppConfig, req LoginVerifyRequest
 		return failLoginState(req.PendingPath, pending, fmt.Errorf("pending login state missing csrf_state"))
 	}
 
-	userID, err := loginWithEmail(ctx, client, upstream, clientVersion, pending.CSRFState, req.Code)
+	userID, err := loginWithEmail(ctx, session, upstream, clientVersion, pending.CSRFState, req.Code)
 	if err != nil {
 		return failLoginState(req.PendingPath, pending, wrapLoginStageError(cfg, upstream, "verify login code", err))
 	}
 	if userID == "" {
-		userID = probeCookieValue(probeCookiesFromJar(client.Jar, upstream.HomeURL()), "notion_user_id")
+		userID = probeCookieValue(probeCookiesFromJar(session.Jar, upstream.HomeURL()), "notion_user_id")
 	}
 	if userID == "" {
 		return failLoginState(req.PendingPath, pending, fmt.Errorf("notion_user_id missing after OTP verify"))
 	}
 
-	spaces, err := getSpacesInitial(ctx, client, upstream, clientVersion, userID)
+	spaces, err := getSpacesInitial(ctx, session, upstream, clientVersion, userID)
 	if err != nil {
 		return failLoginState(req.PendingPath, pending, wrapLoginStageError(cfg, upstream, "load spaces after login", err))
 	}
 
-	cookies := probeCookiesFromJar(client.Jar, upstream.HomeURL())
+	cookies := probeCookiesFromJar(session.Jar, upstream.HomeURL())
 	if len(cookies) == 0 {
-		cookies = probeCookiesFromJar(client.Jar, upstream.LoginURL())
+		cookies = probeCookiesFromJar(session.Jar, upstream.LoginURL())
 	}
 	if len(cookies) == 0 {
 		return failLoginState(req.PendingPath, pending, fmt.Errorf("cookie jar empty after OTP verify"))

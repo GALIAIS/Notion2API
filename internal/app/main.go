@@ -32,8 +32,14 @@ type ServerState struct {
 	Conversations           *ConversationStore
 	AdminTokens             map[string]time.Time
 	AdminLoginAttempts      map[string]AdminLoginAttempt
+	AccountDispatchSlots    map[string]accountDispatchState
 	LastSessionRefresh      time.Time
 	LastSessionRefreshError string
+}
+
+type accountDispatchState struct {
+	MaxConcurrency int
+	InFlight       int
 }
 
 type App struct {
@@ -99,6 +105,135 @@ func maxInt(a int, b int) int {
 	return b
 }
 
+func normalizeAccountMaxConcurrency(raw int) int {
+	if raw <= 0 {
+		return 1
+	}
+	return raw
+}
+
+func (s *ServerState) initializeAccountDispatchSlotsLocked() {
+	if s.AccountDispatchSlots == nil {
+		s.AccountDispatchSlots = map[string]accountDispatchState{}
+	}
+	next := map[string]accountDispatchState{}
+	for _, account := range s.Config.Accounts {
+		emailKey := canonicalEmailKey(account.Email)
+		if emailKey == "" {
+			continue
+		}
+		maxConcurrency := normalizeAccountMaxConcurrency(account.MaxConcurrency)
+		state := s.AccountDispatchSlots[emailKey]
+		state.MaxConcurrency = maxConcurrency
+		if state.InFlight < 0 {
+			state.InFlight = 0
+		}
+		if state.InFlight > state.MaxConcurrency {
+			state.InFlight = state.MaxConcurrency
+		}
+		next[emailKey] = state
+	}
+	s.AccountDispatchSlots = next
+}
+
+func (s *ServerState) TryAcquireAccountDispatchSlot(email string) bool {
+	emailKey := canonicalEmailKey(email)
+	if emailKey == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.initializeAccountDispatchSlotsLocked()
+	state, ok := s.AccountDispatchSlots[emailKey]
+	if !ok {
+		return false
+	}
+	if state.InFlight >= state.MaxConcurrency {
+		return false
+	}
+	state.InFlight++
+	s.AccountDispatchSlots[emailKey] = state
+	return true
+}
+
+func (s *ServerState) ReleaseAccountDispatchSlot(email string) {
+	emailKey := canonicalEmailKey(email)
+	if emailKey == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.AccountDispatchSlots == nil {
+		return
+	}
+	state, ok := s.AccountDispatchSlots[emailKey]
+	if !ok {
+		return
+	}
+	if state.InFlight > 0 {
+		state.InFlight--
+	}
+	s.AccountDispatchSlots[emailKey] = state
+}
+
+func (s *ServerState) RemainingAccountDispatchSlots(email string) int {
+	emailKey := canonicalEmailKey(email)
+	if emailKey == "" {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.initializeAccountDispatchSlotsLocked()
+	state, ok := s.AccountDispatchSlots[emailKey]
+	if !ok {
+		return 0
+	}
+	remaining := state.MaxConcurrency - state.InFlight
+	if remaining < 0 {
+		remaining = 0
+	}
+	return remaining
+}
+
+func (s *ServerState) AvailableDispatchCapacity(emails []string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.initializeAccountDispatchSlotsLocked()
+	total := 0
+	seen := map[string]struct{}{}
+	for _, email := range emails {
+		emailKey := canonicalEmailKey(email)
+		if emailKey == "" {
+			continue
+		}
+		if _, exists := seen[emailKey]; exists {
+			continue
+		}
+		seen[emailKey] = struct{}{}
+		state, ok := s.AccountDispatchSlots[emailKey]
+		if !ok {
+			continue
+		}
+		remaining := state.MaxConcurrency - state.InFlight
+		if remaining > 0 {
+			total += remaining
+		}
+	}
+	return total
+}
+
+func (s *ServerState) AccountDispatchSnapshot() map[string]accountDispatchState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.initializeAccountDispatchSlotsLocked()
+	out := make(map[string]accountDispatchState, len(s.AccountDispatchSlots))
+	for key, value := range s.AccountDispatchSlots {
+		out[key] = value
+	}
+	return out
+}
+
+
 func maxFloat(a float64, b float64) float64 {
 	if a > b {
 		return a
@@ -134,6 +269,7 @@ func newServerState(cfg AppConfig) (*ServerState, error) {
 		Conversations:      newConversationStore(),
 		AdminTokens:        map[string]time.Time{},
 		AdminLoginAttempts: map[string]AdminLoginAttempt{},
+		AccountDispatchSlots: map[string]accountDispatchState{},
 		Store:              store,
 	}
 	persistedAccountsLoaded := false
@@ -204,7 +340,7 @@ func (s *ServerState) ApplyConfig(cfg AppConfig) error {
 			log.Printf("[startup] session bootstrap skipped for probe=%s active=%s: %v", probePath, activeEmail, err)
 		} else {
 			session = loadedSession
-			client = newNotionAIClient(loadedSession, cfg)
+			client = newNotionAIClient(loadedSession, cfg, activeEmail)
 			if activeEmail != "" {
 				cfg.ProbeJSON = loadedSession.ProbePath
 			}
@@ -1320,6 +1456,10 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 func (a *App) writeUpstreamError(w http.ResponseWriter, err error) {
 	message := err.Error()
 	lower := strings.ToLower(message)
+	if isDispatchCapacityExceededError(err) {
+		writeOpenAIError(w, http.StatusTooManyRequests, message, "rate_limit_error", "dispatch_capacity_exceeded")
+		return
+	}
 	if strings.Contains(lower, "context deadline exceeded") || strings.Contains(lower, "timeout") {
 		writeOpenAIError(w, http.StatusGatewayTimeout, message, "api_timeout_error", "upstream_timeout")
 		return

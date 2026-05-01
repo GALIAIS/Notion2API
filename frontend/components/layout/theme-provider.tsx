@@ -1,8 +1,7 @@
 'use client';
 
 import * as React from 'react';
-import { Theme } from '@radix-ui/themes';
-import { ThemeProvider as NextThemesProvider, useTheme } from 'next-themes';
+import { ThemeProvider as NextThemesProvider } from 'next-themes';
 
 export type AccentTheme = 'violet' | 'blue' | 'teal' | 'green' | 'amber' | 'crimson';
 
@@ -10,19 +9,18 @@ type AccentOption = {
   value: AccentTheme;
   label: string;
   preview: string;
-  radixAccent: React.ComponentProps<typeof Theme>['accentColor'];
 };
 
 const ACCENT_STORAGE_KEY = 'nation2api-admin-accent';
 const DEFAULT_ACCENT_THEME: AccentTheme = 'violet';
 
 export const ACCENT_THEME_OPTIONS: AccentOption[] = [
-  { value: 'violet', label: '紫罗兰', preview: '#8b5cf6', radixAccent: 'violet' },
-  { value: 'blue', label: '深海蓝', preview: '#2563eb', radixAccent: 'blue' },
-  { value: 'teal', label: '青碧', preview: '#0f766e', radixAccent: 'teal' },
-  { value: 'green', label: '森绿', preview: '#16a34a', radixAccent: 'green' },
-  { value: 'amber', label: '琥珀', preview: '#d97706', radixAccent: 'amber' },
-  { value: 'crimson', label: '绯红', preview: '#dc2626', radixAccent: 'crimson' },
+  { value: 'violet', label: '紫罗兰', preview: '#8b5cf6' },
+  { value: 'blue', label: '深海蓝', preview: '#2563eb' },
+  { value: 'teal', label: '青碧', preview: '#0f766e' },
+  { value: 'green', label: '森绿', preview: '#16a34a' },
+  { value: 'amber', label: '琥珀', preview: '#d97706' },
+  { value: 'crimson', label: '绳红', preview: '#dc2626' },
 ];
 
 type AccentThemeContextValue = {
@@ -109,27 +107,6 @@ function AccentThemeProvider({ children }: { children: React.ReactNode }) {
   return <AccentThemeContext.Provider value={value}>{children}</AccentThemeContext.Provider>;
 }
 
-function RadixThemeBridge({ children }: { children: React.ReactNode }) {
-  const { resolvedTheme } = useTheme();
-  const accent = useAccentTheme();
-  const accentColor =
-    ACCENT_THEME_OPTIONS.find((option) => option.value === accent.accentTheme)?.radixAccent || 'violet';
-  const appearance = resolvedTheme === 'dark' ? 'dark' : 'light';
-
-  return (
-    <Theme
-      appearance={appearance}
-      accentColor={accentColor}
-      grayColor="mauve"
-      panelBackground="solid"
-      radius="medium"
-      scaling="100%"
-    >
-      {children}
-    </Theme>
-  );
-}
-
 export function useAccentTheme() {
   const context = React.useContext(AccentThemeContext);
   if (!context) {
@@ -144,9 +121,7 @@ export function ThemeProvider({
 }: React.ComponentProps<typeof NextThemesProvider>) {
   return (
     <NextThemesProvider {...props}>
-      <AccentThemeProvider>
-        <RadixThemeBridge>{children}</RadixThemeBridge>
-      </AccentThemeProvider>
+      <AccentThemeProvider>{children}</AccentThemeProvider>
     </NextThemesProvider>
   );
 }

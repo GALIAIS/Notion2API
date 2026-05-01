@@ -11,7 +11,6 @@ import {
   ShieldCheck,
   Trash2,
   WandSparkles,
-  type LucideIcon,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -25,9 +24,11 @@ import {
   InfoCard,
   JsonPreview,
   KeyValueGrid,
+  MetaTile,
   PanelHeader,
   StatCard,
   StatusPill,
+  Subsection,
   formatMaybeDate,
 } from '@/components/admin/shared';
 import type { AccountItem, AccountsPayload, JsonResult, ModelItem } from '@/lib/services/admin/types';
@@ -35,6 +36,7 @@ import type { AccountItem, AccountsPayload, JsonResult, ModelItem } from '@/lib/
 interface AccountEditState {
   priority: number;
   hourlyQuota: number;
+  maxConcurrency: number;
   disabled: boolean;
 }
 
@@ -57,11 +59,8 @@ interface ProbeDraft {
   client_version?: string;
 }
 
-const SURFACE_CARD_CLASS = 'surface-subtle min-w-0 p-4';
-const FIELD_CLASS = 'h-10 rounded-md bg-transparent';
-const TEXTAREA_CLASS = 'rounded-md bg-transparent';
-const TOGGLE_PANEL_CLASS = 'surface-subtle min-w-0 px-4 py-4';
-const META_TILE_CLASS = 'surface-subtle min-w-0 p-3';
+const FIELD_CLASS = 'h-10 rounded-lg bg-transparent';
+const TEXTAREA_CLASS = 'rounded-lg bg-transparent';
 const PROBE_TEXTAREA_CLASS =
   'pretty-scroll h-[360px] min-h-[360px] resize-none !rounded-none !border-0 !bg-transparent px-4 py-3 font-mono text-[12px] leading-6 !shadow-none focus-visible:!ring-0 lg:h-[440px] lg:min-h-[440px]';
 
@@ -83,6 +82,7 @@ function buildAccountEditMap(items: AccountItem[]): Record<string, AccountEditSt
     accumulator[item.email] = {
       priority: Number(item.priority ?? 0),
       hourlyQuota: Number(item.hourly_quota ?? 0),
+      maxConcurrency: Math.max(1, Number(item.max_concurrency ?? 1)),
       disabled: Boolean(item.disabled),
     };
     return accumulator;
@@ -104,33 +104,6 @@ function quotaText(item: AccountItem) {
   return `${item.remaining_quota ?? 0}/${item.hourly_quota ?? 0}`;
 }
 
-function FormBlock({
-  icon: Icon,
-  title,
-  description,
-  children,
-}: {
-  icon: LucideIcon;
-  title: string;
-  description: string;
-  children: ReactNode;
-}) {
-  return (
-    <div className={SURFACE_CARD_CLASS}>
-      <div className="flex items-start gap-3">
-        <div className="flex size-10 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
-          <Icon className="size-5" />
-        </div>
-        <div className="min-w-0 space-y-1">
-          <div className="text-base font-semibold">{title}</div>
-          <p className="text-sm leading-6 text-muted-foreground">{description}</p>
-        </div>
-      </div>
-      <div className="mt-5 space-y-4">{children}</div>
-    </div>
-  );
-}
-
 function DetailField({
   label,
   hint,
@@ -143,7 +116,7 @@ function DetailField({
   return (
     <div className="space-y-2">
       <div className="space-y-1">
-        <Label className="text-sm font-semibold">{label}</Label>
+        <Label className="text-sm font-semibold tracking-tight">{label}</Label>
         {hint ? <p className="text-xs leading-5 text-muted-foreground">{hint}</p> : null}
       </div>
       {children}
@@ -165,8 +138,10 @@ function AccountListItem({
       type="button"
       onClick={onSelect}
       className={[
-        'w-full rounded-lg border px-4 py-4 text-left transition-colors',
-        selected ? 'border-primary/40 bg-primary/5 shadow-sm' : 'border-border/70 bg-background hover:bg-muted/40',
+        'w-full rounded-lg border px-4 py-4 text-left transition-all',
+        selected
+          ? 'border-primary/40 bg-[color-mix(in_oklab,var(--primary)_10%,var(--card))] shadow-soft'
+          : 'border-border/70 bg-card hover:border-primary/20 hover:bg-muted/40',
       ].join(' ')}
     >
       <div className="flex items-start justify-between gap-4">
@@ -298,8 +273,8 @@ export function AccountsPanel({
   const modelOptions = useMemo(() => models.filter((item) => item.id), [models]);
 
   const selectedEdit = selectedAccount?.email
-    ? accountEdits[selectedAccount.email] || { priority: 0, hourlyQuota: 0, disabled: false }
-    : { priority: 0, hourlyQuota: 0, disabled: false };
+    ? accountEdits[selectedAccount.email] || { priority: 0, hourlyQuota: 0, maxConcurrency: 1, disabled: false }
+    : { priority: 0, hourlyQuota: 0, maxConcurrency: 1, disabled: false };
 
   const summaryCards = [
     {
@@ -347,6 +322,7 @@ export function AccountsPanel({
       [email]: {
         priority: current[email]?.priority ?? 0,
         hourlyQuota: current[email]?.hourlyQuota ?? 0,
+        maxConcurrency: current[email]?.maxConcurrency ?? 1,
         disabled: current[email]?.disabled ?? false,
         ...patch,
       },
@@ -383,6 +359,7 @@ export function AccountsPanel({
         email,
         priority: edit.priority,
         hourly_quota: edit.hourlyQuota,
+        max_concurrency: edit.maxConcurrency,
         disabled: edit.disabled,
       });
       toast.success(`已保存 ${email}`);
@@ -411,6 +388,47 @@ export function AccountsPanel({
     }
   }
 
+  async function performManualImport() {
+    setManualBusy(true);
+    setManualHint('导入中...');
+    try {
+      let probe: ProbeDraft | null = null;
+      if (manual.probeJsonText.trim()) {
+        probe = safeParseProbeJSON(manual.probeJsonText);
+      }
+      const email = manual.email.trim() || probe?.email?.trim() || '';
+      if (!email && !manual.cookieHeader.trim() && !manual.probeJsonText.trim()) {
+        throw new Error('请至少提供 cookie_header、Probe JSON 或邮箱');
+      }
+      const payload = await onImportAccount({
+        email,
+        user_id: manual.userId.trim(),
+        user_name: manual.userName.trim(),
+        space_id: manual.spaceId.trim(),
+        space_name: manual.spaceName.trim(),
+        client_version: manual.clientVersion.trim(),
+        cookie_header: manual.cookieHeader.trim(),
+        probe_json_text: manual.probeJsonText.trim(),
+        active: manual.active,
+      });
+      const importedEmail = String(
+        (payload as { account?: { email?: string }; status?: { email?: string } }).account?.email ||
+          (payload as { status?: { email?: string } }).status?.email ||
+          email,
+      );
+      populateEmail(importedEmail);
+      setManual((current) => ({ ...current, email: importedEmail }));
+      setManualHint(`账号 ${importedEmail} 已导入`);
+      toast.success('手动导入成功');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '手动导入失败';
+      setManualHint(message);
+      toast.error(message);
+    } finally {
+      setManualBusy(false);
+    }
+  }
+
   return (
     <div className="space-y-6">
       <PanelHeader
@@ -434,10 +452,10 @@ export function AccountsPanel({
       <div className="grid gap-6 2xl:grid-cols-[minmax(0,1.04fr)_360px]">
         <div className="min-w-0 space-y-6">
           <InfoCard
-            title="验证码登录"
-            description="请求并提交邮箱验证码。"
+            title="验证码登录管线"
+            description="发起验证码请求、提交验证码，同步动作会自动填充到其他区域。"
           >
-            <div className="grid gap-5 xl:grid-cols-2">
+            <div className="grid gap-4 xl:grid-cols-2">
               <form
                 className="min-w-0"
                 onSubmit={async (event) => {
@@ -469,26 +487,28 @@ export function AccountsPanel({
                   }
                 }}
               >
-                <FormBlock icon={MailPlus} title="请求验证码" description="发起登录，并同步到验证码区与测试区。">
-                  <DetailField label="Email" hint="建议使用你准备加入账号池的邮箱。">
-                    <Input
-                      id="account-start-email"
-                      value={startEmail}
-                      onChange={(event) => setStartEmail(event.target.value)}
-                      placeholder="name@example.com"
-                      className={FIELD_CLASS}
-                    />
-                  </DetailField>
-                  <div className="flex flex-wrap items-center gap-3">
-                    <Button type="submit" className="px-4" disabled={starting}>
-                      <Rocket className="size-4" />
-                      {starting ? '请求中...' : '请求验证码'}
-                    </Button>
-                    <p className="text-sm leading-6 text-muted-foreground">
-                      {startMessage || '收到验证码后直接提交。'}
-                    </p>
+                <Subsection eyebrow="Step 1" title="请求验证码" description="发起登录，同步到验证码区与测试区。" icon={MailPlus}>
+                  <div className="space-y-4">
+                    <DetailField label="Email" hint="建议使用你准备加入账号池的邮箱。">
+                      <Input
+                        id="account-start-email"
+                        value={startEmail}
+                        onChange={(event) => setStartEmail(event.target.value)}
+                        placeholder="name@example.com"
+                        className={FIELD_CLASS}
+                      />
+                    </DetailField>
+                    <div className="flex flex-wrap items-center gap-3">
+                      <Button type="submit" className="px-4" disabled={starting}>
+                        <Rocket className="size-4" />
+                        {starting ? '请求中...' : '请求验证码'}
+                      </Button>
+                      <p className="text-sm leading-6 text-muted-foreground">
+                        {startMessage || '收到验证码后直接提交。'}
+                      </p>
+                    </div>
                   </div>
-                </FormBlock>
+                </Subsection>
               </form>
 
               <form
@@ -521,161 +541,123 @@ export function AccountsPanel({
                   }
                 }}
               >
-                <FormBlock icon={ShieldCheck} title="填写验证码" description="验证成功后会自动落盘并切为默认账号。">
-                  <div className="grid gap-4 md:grid-cols-2">
-                    <DetailField label="Email" hint="通常与左侧请求验证码所用邮箱保持一致。">
-                      <Input
-                        id="account-verify-email"
-                        value={verifyEmail}
-                        onChange={(event) => setVerifyEmail(event.target.value)}
-                        placeholder="与左侧邮箱一致"
-                        className={FIELD_CLASS}
-                      />
-                    </DetailField>
-                    <DetailField label="Code" hint="六位验证码，提交后会立刻进入账号池。">
-                      <Input
-                        id="account-verify-code"
-                        value={verifyCode}
-                        onChange={(event) => setVerifyCode(event.target.value)}
-                        placeholder="六位验证码"
-                        className={[FIELD_CLASS, 'tracking-[0.32em]'].join(' ')}
-                      />
-                    </DetailField>
+                <Subsection eyebrow="Step 2" title="填写验证码" description="验证成功后会自动落盘并切为默认账号。" icon={ShieldCheck}>
+                  <div className="space-y-4">
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <DetailField label="Email" hint="通常与左侧请求验证码所用邮箱保持一致。">
+                        <Input
+                          id="account-verify-email"
+                          value={verifyEmail}
+                          onChange={(event) => setVerifyEmail(event.target.value)}
+                          placeholder="与左侧邮箱一致"
+                          className={FIELD_CLASS}
+                        />
+                      </DetailField>
+                      <DetailField label="Code" hint="六位验证码，提交后会立刻进入账号池。">
+                        <Input
+                          id="account-verify-code"
+                          value={verifyCode}
+                          onChange={(event) => setVerifyCode(event.target.value)}
+                          placeholder="六位验证码"
+                          className={[FIELD_CLASS, 'tracking-[0.32em]'].join(' ')}
+                        />
+                      </DetailField>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-3">
+                      <Button type="submit" className="px-4" disabled={verifying}>
+                        <CheckCircle2 className="size-4" />
+                        {verifying ? '验证中...' : '提交验证码'}
+                      </Button>
+                      <p className="text-sm leading-6 text-muted-foreground">
+                        {verifyMessage || '错误时会显示服务端返回信息。'}
+                      </p>
+                    </div>
                   </div>
-                  <div className="flex flex-wrap items-center gap-3">
-                    <Button type="submit" className="px-4" disabled={verifying}>
-                      <CheckCircle2 className="size-4" />
-                      {verifying ? '验证中...' : '提交验证码'}
-                    </Button>
-                    <p className="text-sm leading-6 text-muted-foreground">
-                      {verifyMessage || '错误时会显示服务端返回信息。'}
-                    </p>
-                  </div>
-                </FormBlock>
+                </Subsection>
               </form>
             </div>
           </InfoCard>
 
           <InfoCard
             title="手动导入账号"
-            description="支持只粘贴 cookie / token_v2 自动补全账号信息，也可直接导入完整 Probe JSON。"
+            description="只贴 cookie / token_v2 也能自动补齐，也可直接导入完整 Probe JSON。"
+            actions={
+              <div className="text-sm leading-6 text-muted-foreground">
+                {manualHint || '只填 token_v2 会尝试补齐其他字段。'}
+              </div>
+            }
           >
-            <div className="grid gap-5 xl:grid-cols-[minmax(0,0.94fr)_minmax(320px,1.06fr)]">
-              <div className="min-w-0 space-y-5">
-                <div className="grid gap-4 md:grid-cols-2">
-                  <DetailField label="Email" hint="可留空；若 cookie 或 Probe JSON 足够完整，会自动识别。">
-                    <Input value={manual.email} onChange={(event) => setManual((current) => ({ ...current, email: event.target.value }))} className={FIELD_CLASS} />
-                  </DetailField>
-                  <DetailField label="User ID">
-                    <Input value={manual.userId} onChange={(event) => setManual((current) => ({ ...current, userId: event.target.value }))} className={FIELD_CLASS} />
-                  </DetailField>
-                  <DetailField label="Space ID">
-                    <Input value={manual.spaceId} onChange={(event) => setManual((current) => ({ ...current, spaceId: event.target.value }))} className={FIELD_CLASS} />
-                  </DetailField>
-                  <DetailField label="Client Version">
-                    <Input value={manual.clientVersion} onChange={(event) => setManual((current) => ({ ...current, clientVersion: event.target.value }))} className={FIELD_CLASS} />
-                  </DetailField>
-                  <DetailField label="User Name">
-                    <Input value={manual.userName} onChange={(event) => setManual((current) => ({ ...current, userName: event.target.value }))} className={FIELD_CLASS} />
-                  </DetailField>
-                  <DetailField label="Space Name">
-                    <Input value={manual.spaceName} onChange={(event) => setManual((current) => ({ ...current, spaceName: event.target.value }))} className={FIELD_CLASS} />
-                  </DetailField>
-                </div>
+            <div className="grid gap-4 xl:grid-cols-[minmax(0,0.94fr)_minmax(320px,1.06fr)]">
+              <Subsection eyebrow="Identity" title="账号身份" description="6 个常用字段可以手动填写，也会从右侧 Probe JSON 自动提取。">
+                <div className="space-y-5">
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <DetailField label="Email" hint="可留空；若 cookie 或 Probe JSON 足够完整，会自动识别。">
+                      <Input value={manual.email} onChange={(event) => setManual((current) => ({ ...current, email: event.target.value }))} className={FIELD_CLASS} />
+                    </DetailField>
+                    <DetailField label="User ID">
+                      <Input value={manual.userId} onChange={(event) => setManual((current) => ({ ...current, userId: event.target.value }))} className={FIELD_CLASS} />
+                    </DetailField>
+                    <DetailField label="Space ID">
+                      <Input value={manual.spaceId} onChange={(event) => setManual((current) => ({ ...current, spaceId: event.target.value }))} className={FIELD_CLASS} />
+                    </DetailField>
+                    <DetailField label="Client Version">
+                      <Input value={manual.clientVersion} onChange={(event) => setManual((current) => ({ ...current, clientVersion: event.target.value }))} className={FIELD_CLASS} />
+                    </DetailField>
+                    <DetailField label="User Name">
+                      <Input value={manual.userName} onChange={(event) => setManual((current) => ({ ...current, userName: event.target.value }))} className={FIELD_CLASS} />
+                    </DetailField>
+                    <DetailField label="Space Name">
+                      <Input value={manual.spaceName} onChange={(event) => setManual((current) => ({ ...current, spaceName: event.target.value }))} className={FIELD_CLASS} />
+                    </DetailField>
+                  </div>
 
-                <DetailField label="Cookie Header" hint="支持完整 Cookie header，也支持只填 token_v2=...。">
-                  <Textarea
-                    value={manual.cookieHeader}
-                    onChange={(event) => setManual((current) => ({ ...current, cookieHeader: event.target.value }))}
-                    className={[TEXTAREA_CLASS, 'min-h-[120px]'].join(' ')}
-                    placeholder="cookie1=value1; cookie2=value2"
-                  />
-                </DetailField>
+                  <DetailField label="Cookie Header" hint="支持完整 Cookie header，也支持只填 token_v2=...。">
+                    <Textarea
+                      value={manual.cookieHeader}
+                      onChange={(event) => setManual((current) => ({ ...current, cookieHeader: event.target.value }))}
+                      className={[TEXTAREA_CLASS, 'min-h-[120px]'].join(' ')}
+                      placeholder="cookie1=value1; cookie2=value2"
+                    />
+                  </DetailField>
 
-                <div className={TOGGLE_PANEL_CLASS}>
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="space-y-1">
-                      <div className="text-sm font-semibold">导入后立即激活</div>
+                  <div className="flex items-start justify-between gap-4 rounded-lg border bg-muted/40 px-4 py-4">
+                    <div className="min-w-0 space-y-1">
+                      <div className="text-sm font-semibold tracking-tight">导入后立即激活</div>
                       <p className="text-sm leading-6 text-muted-foreground">适合直接把现成会话切为当前默认账号。</p>
                     </div>
                     <Switch checked={manual.active} onCheckedChange={(checked) => setManual((current) => ({ ...current, active: checked }))} />
                   </div>
-                </div>
 
-                <div className="flex flex-wrap items-center gap-3">
                   <Button
-                    className="px-4"
+                    className="w-full justify-center"
                     disabled={manualBusy}
-                    onClick={async () => {
-                      setManualBusy(true);
-                      setManualHint('导入中...');
-                      try {
-                        let probe: ProbeDraft | null = null;
-                        if (manual.probeJsonText.trim()) {
-                          probe = safeParseProbeJSON(manual.probeJsonText);
-                        }
-                        const email = manual.email.trim() || probe?.email?.trim() || '';
-                        if (!email && !manual.cookieHeader.trim() && !manual.probeJsonText.trim()) {
-                          throw new Error('请至少提供 cookie_header、Probe JSON 或邮箱');
-                        }
-                        const payload = await onImportAccount({
-                          email,
-                          user_id: manual.userId.trim(),
-                          user_name: manual.userName.trim(),
-                          space_id: manual.spaceId.trim(),
-                          space_name: manual.spaceName.trim(),
-                          client_version: manual.clientVersion.trim(),
-                          cookie_header: manual.cookieHeader.trim(),
-                          probe_json_text: manual.probeJsonText.trim(),
-                          active: manual.active,
-                        });
-                        const importedEmail = String(
-                          (payload as { account?: { email?: string }; status?: { email?: string } }).account?.email ||
-                            (payload as { status?: { email?: string } }).status?.email ||
-                            email,
-                        );
-                        populateEmail(importedEmail);
-                        setManual((current) => ({ ...current, email: importedEmail }));
-                        setManualHint(`账号 ${importedEmail} 已导入`);
-                        toast.success('手动导入成功');
-                      } catch (error) {
-                        const message = error instanceof Error ? error.message : '手动导入失败';
-                        setManualHint(message);
-                        toast.error(message);
-                      } finally {
-                        setManualBusy(false);
-                      }
-                    }}
+                    onClick={() => void performManualImport()}
                   >
                     <WandSparkles className="size-4" />
                     {manualBusy ? '导入中...' : '手动导入账号'}
                   </Button>
-                  <div className="text-sm leading-6 text-muted-foreground">
-                    {manualHint || '只填 token_v2 也会尝试自动补齐 email、user_id、space_id、client_version。'}
-                  </div>
                 </div>
-              </div>
+              </Subsection>
 
-              <div className="min-w-0 space-y-2">
-                <Label>Probe JSON</Label>
-                <div className="code-surface overflow-hidden rounded-xl border">
-                  <Textarea
-                    value={manual.probeJsonText}
-                    onChange={(event) => setManual((current) => ({ ...current, probeJsonText: event.target.value }))}
-                    className={PROBE_TEXTAREA_CLASS}
-                    placeholder='{"email":"name@example.com","user_id":"...","space_id":"...","client_version":"...","cookies":[{"name":"token_v2","value":"..."}]}'
-                  />
+              <Subsection eyebrow="Probe JSON" title="完整身份 JSON" description="长 JSON 统一在深色代码区编辑，可补齐上面 Identity 字段。">
+                <div className="space-y-2">
+                  <Label className="sr-only">Probe JSON</Label>
+                  <div className="code-surface overflow-hidden rounded-xl border">
+                    <Textarea
+                      value={manual.probeJsonText}
+                      onChange={(event) => setManual((current) => ({ ...current, probeJsonText: event.target.value }))}
+                      className={PROBE_TEXTAREA_CLASS}
+                      placeholder='{"email":"name@example.com","user_id":"...","space_id":"...","client_version":"...","cookies":[{"name":"token_v2","value":"..."}]}'
+                    />
+                  </div>
+                  <p className="text-xs leading-5 text-muted-foreground">在上方表单已填的字段优先；Probe JSON 仅补齐未填字段。</p>
                 </div>
-                <p className="text-xs leading-5 text-muted-foreground">长 JSON 统一在滚动框内编辑。</p>
-              </div>
+              </Subsection>
             </div>
           </InfoCard>
 
           <div className="grid gap-6 xl:grid-cols-[minmax(320px,360px)_minmax(0,1fr)] 2xl:grid-cols-[minmax(340px,0.8fr)_minmax(0,1.2fr)]">
-            <InfoCard
-              title="账号池"
-              description="选择账号后查看详情。"
-            >
+            <InfoCard title="账号池" description={`共 ${accountOptions.length} 个账号，点击查看详情。`}>
               {accountOptions.length ? (
                 <ScrollArea className="console-list-scroll pretty-scroll pr-3">
                   <div className="space-y-3 pb-1">
@@ -693,17 +675,11 @@ export function AccountsPanel({
                   </div>
                 </ScrollArea>
               ) : (
-                <EmptyHint
-                  title="当前还没有账号"
-                  description="可先请求验证码，或直接导入 Probe JSON。"
-                />
+                <EmptyHint title="当前还没有账号" description="可先请求验证码，或直接导入 Probe JSON。" />
               )}
             </InfoCard>
 
-            <InfoCard
-              title="账号详情与操作"
-              description="当前账号的运行信息与操作入口。"
-            >
+            <InfoCard title="账号详情与操作" description="当前账号的运行信息与操作入口。">
               {selectedAccount ? (
                 <div className="space-y-5">
                   <KeyValueGrid
@@ -719,105 +695,90 @@ export function AccountsPanel({
                   />
 
                   <div className="grid gap-4 lg:grid-cols-2">
-                    <div className="surface-subtle space-y-4 rounded-lg p-4">
-                      <div>
-                        <div className="text-sm font-semibold">调度与限额</div>
-                        <p className="mt-1 text-sm leading-6 text-muted-foreground">保存后直接写回账号池。</p>
-                      </div>
-                      <div className="grid gap-4 md:grid-cols-2">
-                        <DetailField label="Priority">
-                          <Input
-                            type="number"
-                            value={selectedEdit.priority}
-                            onChange={(event) =>
-                              updateAccountEdit(selectedAccount.email, {
-                                priority: Number(event.target.value || 0),
-                              })
-                            }
-                            className={FIELD_CLASS}
-                          />
-                        </DetailField>
-                        <DetailField label="Hourly Quota">
-                          <Input
-                            type="number"
-                            min="0"
-                            value={selectedEdit.hourlyQuota}
-                            onChange={(event) =>
-                              updateAccountEdit(selectedAccount.email, {
-                                hourlyQuota: Number(event.target.value || 0),
-                              })
-                            }
-                            className={FIELD_CLASS}
-                          />
-                        </DetailField>
-                      </div>
-                      <div className="flex items-center justify-between gap-3 rounded-md border bg-muted/40 px-3 py-3">
-                        <div>
-                          <div className="text-sm font-semibold">Disabled</div>
-                          <p className="text-xs leading-5 text-muted-foreground">禁用后仍保留账号数据，但不参与调度。</p>
+                    <Subsection eyebrow="Scheduling" title="调度与限额" description="保存后直接写回账号池。">
+                      <div className="space-y-4">
+                        <div className="grid gap-4 md:grid-cols-3">
+                          <DetailField label="Priority">
+                            <Input
+                              type="number"
+                              value={selectedEdit.priority}
+                              onChange={(event) =>
+                                updateAccountEdit(selectedAccount.email, {
+                                  priority: Number(event.target.value || 0),
+                                })
+                              }
+                              className={FIELD_CLASS}
+                            />
+                          </DetailField>
+                          <DetailField label="Hourly Quota" hint="0 表示不限制。">
+                            <Input
+                              type="number"
+                              min="0"
+                              value={selectedEdit.hourlyQuota}
+                              onChange={(event) =>
+                                updateAccountEdit(selectedAccount.email, {
+                                  hourlyQuota: Math.max(0, Number(event.target.value || 0)),
+                                })
+                              }
+                              className={FIELD_CLASS}
+                            />
+                          </DetailField>
+                          <DetailField label="Max Concurrency" hint="每账号并发槽位，最小值 1。">
+                            <Input
+                              type="number"
+                              min="1"
+                              value={selectedEdit.maxConcurrency}
+                              onChange={(event) =>
+                                updateAccountEdit(selectedAccount.email, {
+                                  maxConcurrency: Math.max(1, Number(event.target.value || 1)),
+                                })
+                              }
+                              className={FIELD_CLASS}
+                            />
+                          </DetailField>
                         </div>
-                        <Switch
-                          checked={selectedEdit.disabled}
-                          onCheckedChange={(checked) => updateAccountEdit(selectedAccount.email, { disabled: checked })}
-                        />
+                        <div className="flex items-center justify-between gap-3 rounded-xl border bg-muted/40 px-3 py-3">
+                          <div>
+                            <div className="text-sm font-semibold tracking-tight">Disabled</div>
+                            <p className="text-xs leading-5 text-muted-foreground">禁用后仍保留账号数据，但不参与调度。</p>
+                          </div>
+                          <Switch
+                            checked={selectedEdit.disabled}
+                            onCheckedChange={(checked) => updateAccountEdit(selectedAccount.email, { disabled: checked })}
+                          />
+                        </div>
                       </div>
-                    </div>
+                    </Subsection>
 
-                    <div className="surface-subtle space-y-4 rounded-lg p-4">
-                      <div>
-                        <div className="text-sm font-semibold">运行态摘要</div>
-                        <p className="mt-1 text-sm leading-6 text-muted-foreground">最近登录、使用与失败记录。</p>
-                      </div>
+                    <Subsection eyebrow="Runtime" title="运行态摘要" description="最近登录、使用与失败记录。">
                       <div className="grid gap-3 sm:grid-cols-2">
-                        <div className={META_TILE_CLASS}>
-                          <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-muted-foreground">Quota</div>
-                          <div className="mt-2 text-sm font-medium">{quotaText(selectedAccount)}</div>
-                        </div>
-                        <div className={META_TILE_CLASS}>
-                          <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-muted-foreground">Cooldown</div>
-                          <div className="mt-2 text-sm font-medium">
-                            {selectedAccount.cooldown_active ? `${selectedAccount.cooldown_remaining_sec || 0}s` : 'ready'}
-                          </div>
-                        </div>
-                        <div className={META_TILE_CLASS}>
-                          <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-muted-foreground">Success / Fail</div>
-                          <div className="mt-2 text-sm font-medium">
-                            {selectedAccount.total_successes || 0} / {selectedAccount.total_failures || 0}
-                          </div>
-                        </div>
-                        <div className={META_TILE_CLASS}>
-                          <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-muted-foreground">Last Used</div>
-                          <div className="mt-2 text-sm font-medium">{formatMaybeDate(selectedAccount.last_used_at)}</div>
-                        </div>
+                        <MetaTile label="Quota" value={quotaText(selectedAccount)} />
+                        <MetaTile
+                          label="Cooldown"
+                          value={selectedAccount.cooldown_active ? `${selectedAccount.cooldown_remaining_sec || 0}s` : 'ready'}
+                        />
+                        <MetaTile
+                          label="Success / Fail"
+                          value={`${selectedAccount.total_successes || 0} / ${selectedAccount.total_failures || 0}`}
+                        />
+                        <MetaTile label="Last Used" value={formatMaybeDate(selectedAccount.last_used_at)} />
                       </div>
-                    </div>
+                    </Subsection>
                   </div>
 
-                  <div className="grid gap-4 lg:grid-cols-2">
-                    <div className={META_TILE_CLASS}>
-                      <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-muted-foreground">Login Message</div>
-                      <div className="mt-2 value-box pretty-scroll">
-                        {selectedAccount.login_status?.message || selectedAccount.login_status?.error || '-'}
-                      </div>
-                    </div>
-                    <div className={META_TILE_CLASS}>
-                      <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-muted-foreground">Last Error</div>
-                      <div className="mt-2 value-box pretty-scroll">{selectedAccount.last_error || '-'}</div>
-                    </div>
+                  <div className="grid gap-3 lg:grid-cols-2">
+                    <MetaTile
+                      label="Login Message"
+                      scrollable
+                      value={selectedAccount.login_status?.message || selectedAccount.login_status?.error || '-'}
+                    />
+                    <MetaTile label="Last Error" scrollable value={selectedAccount.last_error || '-'} />
                   </div>
+
                   <div className="grid gap-3 lg:grid-cols-3">
-                    <div className={META_TILE_CLASS}>
-                      <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-muted-foreground">Probe JSON</div>
-                      <div className="mt-2 value-box pretty-scroll">{selectedAccount.probe_json || '-'}</div>
-                    </div>
-                    <div className={META_TILE_CLASS}>
-                      <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-muted-foreground">Profile Dir</div>
-                      <div className="mt-2 value-box pretty-scroll">{selectedAccount.profile_dir || '-'}</div>
-                    </div>
-                    <div className={META_TILE_CLASS}>
-                      <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-muted-foreground">Storage State</div>
-                      <div className="mt-2 value-box pretty-scroll">{selectedAccount.storage_state_path || '-'}</div>
-                    </div>
+                    <MetaTile label="Probe JSON" scrollable value={selectedAccount.probe_json || '-'} />
+                    <MetaTile label="Profile Dir" scrollable value={selectedAccount.profile_dir || '-'} />
+                    <MetaTile label="Storage State" scrollable value={selectedAccount.storage_state_path || '-'} />
                   </div>
 
                   <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
@@ -850,25 +811,16 @@ export function AccountsPanel({
           </div>
         </div>
 
-        <div className="min-w-0 space-y-6 self-start xl:sticky xl:top-6">
-          <InfoCard
-            title="Runtime 概览"
-            description="账号池与会话摘要。"
-          >
+        <aside className="pretty-scroll min-w-0 space-y-5 self-start xl:sticky xl:top-6 xl:max-h-[calc(100vh-3rem)] xl:overflow-y-auto xl:pr-1">
+          <InfoCard title="Runtime 概览" description="账号池与会话摘要。">
             <div className="grid gap-3">
               {runtimeCards.map((item) => (
-                <div key={item.label} className={META_TILE_CLASS}>
-                  <div className="mb-2 text-[11px] font-bold uppercase tracking-[0.18em] text-muted-foreground">{item.label}</div>
-                  <div className="value-box pretty-scroll">{item.value}</div>
-                </div>
+                <MetaTile key={item.label} label={item.label} scrollable value={item.value} />
               ))}
             </div>
           </InfoCard>
 
-          <InfoCard
-            title="快速测试指定账号"
-            description="验证账号与模型是否可用。"
-          >
+          <InfoCard title="快速测试指定账号" description="验证账号与模型是否可用。">
             <div className="space-y-4">
               <DetailField label="Account">
                 <Select value={quickTestEmail} onValueChange={setQuickTestEmail} disabled={!accountOptions.length}>
@@ -898,25 +850,20 @@ export function AccountsPanel({
                   </SelectContent>
                 </Select>
               </DetailField>
-              <DetailField label="Prompt" hint="建议先用短 prompt 探测 READY 状态，再换成长内容回归。">
+              <DetailField label="Prompt" hint="建议先用短 prompt 探测 READY，再换长内容回归。">
                 <Textarea value={quickTestPrompt} onChange={(event) => setQuickTestPrompt(event.target.value)} className={[TEXTAREA_CLASS, 'min-h-[130px]'].join(' ')} />
               </DetailField>
-              <div className="flex flex-wrap items-center gap-3">
-                <Button className="px-4" disabled={quickTesting || !quickTestEmail} onClick={() => void runQuickTest(quickTestEmail)}>
-                  <Rocket className="size-4" />
-                  {quickTesting ? '测试中...' : '测试账号'}
-                </Button>
-                <div className="text-sm text-muted-foreground">{quickTestMessage || '建议先用短 prompt 验证账号是否 READY。'}</div>
-              </div>
+              <Button className="w-full justify-center" disabled={quickTesting || !quickTestEmail} onClick={() => void runQuickTest(quickTestEmail)}>
+                <Rocket className="size-4" />
+                {quickTesting ? '测试中...' : '测试账号'}
+              </Button>
+              <p className="text-xs leading-5 text-muted-foreground">{quickTestMessage || '建议先用短 prompt 验证账号是否 READY。'}</p>
             </div>
           </InfoCard>
 
           <JsonPreview title="账号测试输出" value={quickTestOutput} minHeight={320} />
-        </div>
+        </aside>
       </div>
     </div>
   );
 }
-
-
-

@@ -103,6 +103,13 @@ func normalizeChatInput(payload map[string]any) (NormalizedInput, error) {
 	if !ok {
 		return NormalizedInput{}, fmt.Errorf("messages must be an array")
 	}
+	return normalizeChatInputFromParts(rawMessages, payload["attachments"])
+}
+
+func normalizeChatInputFromParts(rawMessages []any, attachmentsRaw any) (NormalizedInput, error) {
+	if rawMessages == nil {
+		return NormalizedInput{}, fmt.Errorf("messages must be an array")
+	}
 	segments := make([]conversationPromptSegment, 0, len(rawMessages))
 	hiddenParts := make([]string, 0, len(rawMessages))
 	attachments := []InputAttachment{}
@@ -125,7 +132,7 @@ func normalizeChatInput(payload map[string]any) (NormalizedInput, error) {
 		hiddenParts = append(hiddenParts, hiddenSegments...)
 		attachments = append(attachments, atts...)
 	}
-	extra, err := extractAttachmentsFromAny(payload["attachments"])
+	extra, err := extractAttachmentsFromAny(attachmentsRaw)
 	if err != nil {
 		return NormalizedInput{}, err
 	}
@@ -221,6 +228,10 @@ func buildConversationTranscriptPrompt(segments []conversationPromptSegment) str
 }
 
 func normalizeResponsesInput(payload map[string]any, previousResponse map[string]any) (NormalizedInput, error) {
+	return normalizeResponsesInputFromParts(payload["input"], payload["attachments"], previousResponse)
+}
+
+func normalizeResponsesInputFromParts(rawInput any, attachmentsRaw any, previousResponse map[string]any) (NormalizedInput, error) {
 	var (
 		prompt       string
 		hiddenPrompt string
@@ -228,7 +239,7 @@ func normalizeResponsesInput(payload map[string]any, previousResponse map[string
 		segments     []conversationPromptSegment
 		err          error
 	)
-	switch x := payload["input"].(type) {
+	switch x := rawInput.(type) {
 	case string:
 		prompt = strings.TrimSpace(x)
 		segments = appendConversationPromptSegment(segments, "user", prompt)
@@ -242,10 +253,10 @@ func normalizeResponsesInput(payload map[string]any, previousResponse map[string
 			return NormalizedInput{}, err
 		}
 	default:
-		prompt = strings.TrimSpace(flattenContent(payload["input"]))
+		prompt = strings.TrimSpace(flattenContent(rawInput))
 		segments = appendConversationPromptSegment(segments, "user", prompt)
 	}
-	extra, err := extractAttachmentsFromAny(payload["attachments"])
+	extra, err := extractAttachmentsFromAny(attachmentsRaw)
 	if err != nil {
 		return NormalizedInput{}, err
 	}

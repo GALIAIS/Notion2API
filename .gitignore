@@ -35,6 +35,8 @@ frontend/out/
 
 # Local test sources stay out of git
 *_test.go
+!internal/wreq/wreq_streaming_test.go
+!internal/wreq/wreq_streaming_stub_test.go
 *.test.ts
 *.test.tsx
 *.spec.ts

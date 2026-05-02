@@ -10,6 +10,11 @@ import (
 	"strings"
 )
 
+var (
+	accountPathSlugPattern     = regexp.MustCompile(`[^a-z0-9]+`)
+	windowsAbsolutePathPattern = regexp.MustCompile(`^[A-Za-z]:[\\/].*`)
+)
+
 type ResolvedLoginHelper struct {
 	SessionsDir string `json:"sessions_dir"`
 	TimeoutSec  int    `json:"timeout_sec"`
@@ -50,13 +55,19 @@ func canonicalEmailKey(email string) string {
 	return strings.ToLower(strings.TrimSpace(email))
 }
 
+func getAccountEmailKey(account NotionAccount) string {
+	if account.emailKey != "" {
+		return account.emailKey
+	}
+	return canonicalEmailKey(account.Email)
+}
+
 func accountPathSlug(email string) string {
 	clean := canonicalEmailKey(email)
 	if clean == "" {
 		return "account"
 	}
-	re := regexp.MustCompile(`[^a-z0-9]+`)
-	clean = re.ReplaceAllString(clean, "_")
+	clean = accountPathSlugPattern.ReplaceAllString(clean, "_")
 	clean = strings.Trim(clean, "_")
 	if clean == "" {
 		return "account"
@@ -99,7 +110,7 @@ func pathLooksAbsoluteAnyOS(value string) bool {
 	if filepath.IsAbs(clean) {
 		return true
 	}
-	if matched, _ := regexp.MatchString(`^[A-Za-z]:[\\/].*`, clean); matched {
+	if windowsAbsolutePathPattern.MatchString(clean) {
 		return true
 	}
 	if strings.HasPrefix(clean, `\\`) {
@@ -119,7 +130,7 @@ func isForeignAbsolutePath(value string) bool {
 	if runtime.GOOS == "windows" {
 		return strings.HasPrefix(clean, "/")
 	}
-	if matched, _ := regexp.MatchString(`^[A-Za-z]:[\\/].*`, clean); matched {
+	if windowsAbsolutePathPattern.MatchString(clean) {
 		return true
 	}
 	if strings.HasPrefix(clean, `\\`) {
@@ -150,7 +161,7 @@ func (cfg AppConfig) FindAccount(email string) (NotionAccount, int, bool) {
 		return NotionAccount{}, -1, false
 	}
 	for i, account := range cfg.Accounts {
-		if canonicalEmailKey(account.Email) == target {
+		if getAccountEmailKey(account) == target {
 			return account, i, true
 		}
 	}
@@ -215,6 +226,7 @@ func (helper ResolvedLoginHelper) ProbePath(profileDir string) string {
 }
 
 func ensureAccountPaths(cfg AppConfig, account NotionAccount) NotionAccount {
+	account.emailKey = canonicalEmailKey(account.Email)
 	helper := cfg.ResolveLoginHelper()
 	if strings.TrimSpace(account.ProfileDir) == "" || isForeignAbsolutePath(account.ProfileDir) {
 		account.ProfileDir = helper.ProfileDirFor(account.Email)
@@ -328,12 +340,13 @@ func (cfg *AppConfig) UpsertAccount(account NotionAccount) (NotionAccount, int) 
 }
 
 func (cfg *AppConfig) DeleteAccount(email string) bool {
-	_, index, ok := cfg.FindAccount(email)
+	target := canonicalEmailKey(email)
+	_, index, ok := cfg.FindAccount(target)
 	if !ok {
 		return false
 	}
 	cfg.Accounts = append(cfg.Accounts[:index], cfg.Accounts[index+1:]...)
-	if canonicalEmailKey(cfg.ActiveAccount) == canonicalEmailKey(email) {
+	if canonicalEmailKey(cfg.ActiveAccount) == target {
 		cfg.ActiveAccount = ""
 		cfg.ProbeJSON = ""
 	}

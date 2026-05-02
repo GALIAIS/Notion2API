@@ -44,7 +44,7 @@ COPY wreq-ffi ./wreq-ffi
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/cargo-target,id=cargo-target-${TARGETARCH},sharing=locked \
+    --mount=type=cache,target=/cargo-target,id=cargo-target-${TARGETARCH},sharing=private \
     set -eux; \
     RUST_TARGET=$(cat /tmp/rust_target); \
     case "${TARGETARCH}" in \
@@ -133,8 +133,11 @@ RUN apt-get update \
     && mkdir -p /opt/notion2api-helper /app/config /app/data/notion_accounts /app/static
 
 RUN cd /opt/notion2api-helper \
-    && npm init -y >/dev/null 2>&1 \
-    && npm install --omit=dev --no-package-lock node-wreq@2.2.1 \
+    && npm pack node-wreq@2.2.1 \
+    && tar -xf node-wreq-2.2.1.tgz \
+    && mkdir -p "$NODE_PATH" \
+    && mv package "$NODE_PATH/node-wreq" \
+    && rm -f node-wreq-2.2.1.tgz \
     && test -d "$NODE_PATH/node-wreq" \
     && npm cache clean --force >/dev/null 2>&1
 

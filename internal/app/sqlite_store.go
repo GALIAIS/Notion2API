@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -14,7 +15,16 @@ import (
 
 type SQLiteStore struct {
 	db   *sql.DB
+	roDB *sql.DB
 	path string
+}
+
+func observeSQLiteDuration(op string, startedAt time.Time) {
+	if startedAt.IsZero() {
+		return
+	}
+	elapsed := time.Since(startedAt)
+	observeSQLiteOpDuration(op, elapsed)
 }
 
 func openSQLiteStore(cfg AppConfig) (*SQLiteStore, error) {
@@ -33,11 +43,21 @@ func openSQLiteStore(cfg AppConfig) (*SQLiteStore, error) {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
 	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 	store := &SQLiteStore{db: db, path: path}
 	if err := store.init(); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
+	roDB, err := sql.Open("sqlite", fmt.Sprintf("file:%s?mode=ro&_journal=WAL", path))
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("open sqlite read-only: %w", err)
+	}
+	readers := maxInt(2, runtime.NumCPU())
+	roDB.SetMaxOpenConns(readers)
+	roDB.SetMaxIdleConns(readers)
+	store.roDB = roDB
 	return store, nil
 }
 
@@ -49,10 +69,21 @@ func (s *SQLiteStore) Path() string {
 }
 
 func (s *SQLiteStore) Close() error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil
 	}
-	return s.db.Close()
+	var closeErr error
+	if s.roDB != nil {
+		if err := s.roDB.Close(); err != nil && closeErr == nil {
+			closeErr = err
+		}
+	}
+	if s.db != nil {
+		if err := s.db.Close(); err != nil && closeErr == nil {
+			closeErr = err
+		}
+	}
+	return closeErr
 }
 
 func (s *SQLiteStore) init() error {
@@ -64,6 +95,10 @@ func (s *SQLiteStore) init() error {
 		`PRAGMA busy_timeout=5000;`,
 		`PRAGMA synchronous=NORMAL;`,
 		`PRAGMA foreign_keys=ON;`,
+		`PRAGMA mmap_size=268435456;`,
+		`PRAGMA cache_size=-65536;`,
+		`PRAGMA temp_store=MEMORY;`,
+		`PRAGMA wal_autocheckpoint=1000;`,
 	}
 	for _, stmt := range pragmas {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -164,7 +199,19 @@ func (s *SQLiteStore) init() error {
 	return nil
 }
 
+func (s *SQLiteStore) readDB() *sql.DB {
+	if s == nil {
+		return nil
+	}
+	if s.roDB != nil {
+		return s.roDB
+	}
+	return s.db
+}
+
 func (s *SQLiteStore) SaveAccounts(cfg AppConfig) error {
+	startedAt := time.Now()
+	defer observeSQLiteDuration("save_accounts", startedAt)
 	if s == nil || s.db == nil {
 		return nil
 	}
@@ -190,7 +237,7 @@ func (s *SQLiteStore) SaveAccounts(cfg AppConfig) error {
 			return err
 		}
 		active := 0
-		if canonicalEmailKey(account.Email) == activeKey {
+		if getAccountEmailKey(account) == activeKey {
 			active = 1
 		}
 		if _, err = tx.Exec(
@@ -211,10 +258,13 @@ func (s *SQLiteStore) SaveAccounts(cfg AppConfig) error {
 }
 
 func (s *SQLiteStore) LoadAccounts() ([]NotionAccount, string, bool, error) {
-	if s == nil || s.db == nil {
+	startedAt := time.Now()
+	defer observeSQLiteDuration("load_accounts", startedAt)
+	db := s.readDB()
+	if db == nil {
 		return nil, "", false, nil
 	}
-	rows, err := s.db.Query(`SELECT data_json, active FROM accounts ORDER BY position ASC, email ASC`)
+	rows, err := db.Query(`SELECT data_json, active FROM accounts ORDER BY position ASC, email ASC`)
 	if err != nil {
 		return nil, "", false, err
 	}
@@ -243,6 +293,8 @@ func (s *SQLiteStore) LoadAccounts() ([]NotionAccount, string, bool, error) {
 }
 
 func (s *SQLiteStore) SaveConversation(entry ConversationEntry) error {
+	startedAt := time.Now()
+	defer observeSQLiteDuration("save_conversation", startedAt)
 	if s == nil || s.db == nil {
 		return nil
 	}
@@ -268,6 +320,8 @@ func (s *SQLiteStore) SaveConversation(entry ConversationEntry) error {
 }
 
 func (s *SQLiteStore) DeleteConversation(id string) error {
+	startedAt := time.Now()
+	defer observeSQLiteDuration("delete_conversation", startedAt)
 	if s == nil || s.db == nil || strings.TrimSpace(id) == "" {
 		return nil
 	}
@@ -276,6 +330,8 @@ func (s *SQLiteStore) DeleteConversation(id string) error {
 }
 
 func (s *SQLiteStore) DeleteResponsesByConversationOrThread(conversationID string, threadID string) error {
+	startedAt := time.Now()
+	defer observeSQLiteDuration("delete_responses_by_conversation_or_thread", startedAt)
 	if s == nil || s.db == nil {
 		return nil
 	}
@@ -297,10 +353,13 @@ func (s *SQLiteStore) DeleteResponsesByConversationOrThread(conversationID strin
 }
 
 func (s *SQLiteStore) LoadConversations() ([]ConversationEntry, error) {
-	if s == nil || s.db == nil {
+	startedAt := time.Now()
+	defer observeSQLiteDuration("load_conversations", startedAt)
+	db := s.readDB()
+	if db == nil {
 		return nil, nil
 	}
-	rows, err := s.db.Query(`SELECT data_json FROM conversations ORDER BY updated_at DESC, created_at DESC LIMIT ?`, maxConversationEntries)
+	rows, err := db.Query(`SELECT data_json FROM conversations ORDER BY updated_at DESC, created_at DESC LIMIT ?`, maxConversationEntries)
 	if err != nil {
 		return nil, err
 	}
@@ -324,6 +383,8 @@ func (s *SQLiteStore) LoadConversations() ([]ConversationEntry, error) {
 }
 
 func (s *SQLiteStore) SaveResponse(responseID string, payload map[string]any, createdAt time.Time, conversationID string, threadID string, accountEmail string) error {
+	startedAt := time.Now()
+	defer observeSQLiteDuration("save_response", startedAt)
 	if s == nil || s.db == nil || strings.TrimSpace(responseID) == "" {
 		return nil
 	}
@@ -351,6 +412,8 @@ func (s *SQLiteStore) SaveResponse(responseID string, payload map[string]any, cr
 }
 
 func (s *SQLiteStore) DeleteExpiredResponses(ttl time.Duration) error {
+	startedAt := time.Now()
+	defer observeSQLiteDuration("delete_expired_responses", startedAt)
 	if s == nil || s.db == nil || ttl <= 0 {
 		return nil
 	}
@@ -360,13 +423,16 @@ func (s *SQLiteStore) DeleteExpiredResponses(ttl time.Duration) error {
 }
 
 func (s *SQLiteStore) LoadResponses(ttl time.Duration) (map[string]StoredResponse, error) {
-	if s == nil || s.db == nil {
+	startedAt := time.Now()
+	defer observeSQLiteDuration("load_responses", startedAt)
+	db := s.readDB()
+	if db == nil {
 		return map[string]StoredResponse{}, nil
 	}
 	if err := s.DeleteExpiredResponses(ttl); err != nil {
 		return nil, err
 	}
-	rows, err := s.db.Query(`SELECT response_id, created_at, payload_json, conversation_id, thread_id, account_email FROM responses ORDER BY created_at DESC`)
+	rows, err := db.Query(`SELECT response_id, created_at, payload_json, conversation_id, thread_id, account_email FROM responses ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -405,6 +471,8 @@ func (s *SQLiteStore) LoadResponses(ttl time.Duration) (map[string]StoredRespons
 }
 
 func (s *SQLiteStore) SaveConversationSession(session ConversationSession) error {
+	startedAt := time.Now()
+	defer observeSQLiteDuration("save_conversation_session", startedAt)
 	if s == nil || s.db == nil || strings.TrimSpace(session.ID) == "" {
 		return nil
 	}
@@ -451,6 +519,8 @@ func (s *SQLiteStore) SaveConversationSession(session ConversationSession) error
 }
 
 func (s *SQLiteStore) SaveConversationSessionStep(step ConversationSessionStep) error {
+	startedAt := time.Now()
+	defer observeSQLiteDuration("save_conversation_session_step", startedAt)
 	if s == nil || s.db == nil || strings.TrimSpace(step.SessionID) == "" || strings.TrimSpace(step.UpdatedConfigID) == "" {
 		return nil
 	}
@@ -489,10 +559,13 @@ func (s *SQLiteStore) LoadConversationSessionBySessionID(sessionID string) (Conv
 }
 
 func (s *SQLiteStore) loadConversationSession(query string, arg string) (ConversationSession, bool, error) {
-	if s == nil || s.db == nil || strings.TrimSpace(arg) == "" {
+	startedAt := time.Now()
+	defer observeSQLiteDuration("load_conversation_session", startedAt)
+	db := s.readDB()
+	if db == nil || strings.TrimSpace(arg) == "" {
 		return ConversationSession{}, false, nil
 	}
-	row := s.db.QueryRow(query, arg)
+	row := db.QueryRow(query, arg)
 	var (
 		session                                                     ConversationSession
 		createdAtText, updatedAtText, lastUsedAtText, deletedAtText string
@@ -543,10 +616,13 @@ func (s *SQLiteStore) loadConversationSession(query string, arg string) (Convers
 }
 
 func (s *SQLiteStore) LoadConversationSessionStepIDs(sessionID string) ([]string, error) {
-	if s == nil || s.db == nil || strings.TrimSpace(sessionID) == "" {
+	startedAt := time.Now()
+	defer observeSQLiteDuration("load_conversation_session_step_ids", startedAt)
+	db := s.readDB()
+	if db == nil || strings.TrimSpace(sessionID) == "" {
 		return nil, nil
 	}
-	rows, err := s.db.Query(`SELECT updated_config_id FROM conversation_session_steps WHERE session_id = ? ORDER BY step_index ASC`, strings.TrimSpace(sessionID))
+	rows, err := db.Query(`SELECT updated_config_id FROM conversation_session_steps WHERE session_id = ? ORDER BY step_index ASC`, strings.TrimSpace(sessionID))
 	if err != nil {
 		return nil, err
 	}
@@ -563,6 +639,8 @@ func (s *SQLiteStore) LoadConversationSessionStepIDs(sessionID string) ([]string
 }
 
 func (s *SQLiteStore) MarkConversationSessionStatus(sessionID string, status string) error {
+	startedAt := time.Now()
+	defer observeSQLiteDuration("mark_conversation_session_status", startedAt)
 	if s == nil || s.db == nil || strings.TrimSpace(sessionID) == "" {
 		return nil
 	}
@@ -581,6 +659,8 @@ func (s *SQLiteStore) MarkConversationSessionStatus(sessionID string, status str
 }
 
 func (s *SQLiteStore) DeleteConversationSessionByConversationOrThread(conversationID string, threadID string) error {
+	startedAt := time.Now()
+	defer observeSQLiteDuration("delete_conversation_session_by_conversation_or_thread", startedAt)
 	if s == nil || s.db == nil {
 		return nil
 	}
@@ -644,6 +724,8 @@ func (s *SQLiteStore) DeleteConversationSessionByConversationOrThread(conversati
 }
 
 func (s *SQLiteStore) SaveSillyTavernBinding(binding SillyTavernBinding) error {
+	startedAt := time.Now()
+	defer observeSQLiteDuration("save_sillytavern_binding", startedAt)
 	if s == nil || s.db == nil || strings.TrimSpace(binding.ConversationID) == "" {
 		return nil
 	}
@@ -676,13 +758,16 @@ func (s *SQLiteStore) SaveSillyTavernBinding(binding SillyTavernBinding) error {
 }
 
 func (s *SQLiteStore) LoadRecentSillyTavernBindings(profileKey string, limit int) ([]SillyTavernBinding, error) {
-	if s == nil || s.db == nil || strings.TrimSpace(profileKey) == "" {
+	startedAt := time.Now()
+	defer observeSQLiteDuration("load_recent_sillytavern_bindings", startedAt)
+	db := s.readDB()
+	if db == nil || strings.TrimSpace(profileKey) == "" {
 		return nil, nil
 	}
 	if limit <= 0 {
 		limit = 12
 	}
-	rows, err := s.db.Query(
+	rows, err := db.Query(
 		`SELECT conversation_id, profile_key, thread_id, account_email, mode, transcript_json, raw_message_count, updated_at
 		 FROM sillytavern_bindings
 		 WHERE profile_key = ?
@@ -729,6 +814,8 @@ func (s *SQLiteStore) LoadRecentSillyTavernBindings(profileKey string, limit int
 }
 
 func (s *SQLiteStore) DeleteSillyTavernBinding(conversationID string) error {
+	startedAt := time.Now()
+	defer observeSQLiteDuration("delete_sillytavern_binding", startedAt)
 	if s == nil || s.db == nil || strings.TrimSpace(conversationID) == "" {
 		return nil
 	}

@@ -47,6 +47,19 @@ type SessionRefreshConfig struct {
 	AutoSwitch       bool `json:"auto_switch_account"`
 }
 
+type DispatchConfig struct {
+	ProbeCacheTTLSeconds int `json:"probe_cache_ttl_seconds,omitempty"`
+}
+
+type BrowserConfig struct {
+	HelperPoolSize int `json:"helper_pool_size,omitempty"`
+}
+
+type DebugConfig struct {
+	PprofEnabled bool   `json:"pprof_enabled"`
+	PprofAddr    string `json:"pprof_addr,omitempty"`
+}
+
 type StorageConfig struct {
 	SQLitePath                   string `json:"sqlite_path,omitempty"`
 	PersistConversations         bool   `json:"persist_conversations"`
@@ -54,6 +67,10 @@ type StorageConfig struct {
 	PersistResponses             *bool  `json:"persist_responses,omitempty"`
 	PersistContinuationSessions  *bool  `json:"persist_continuation_sessions,omitempty"`
 	PersistSillyTavernBindings   *bool  `json:"persist_sillytavern_bindings,omitempty"`
+}
+
+type LimitsConfig struct {
+	MaxRequestBodyBytes int64 `json:"max_request_body_bytes,omitempty"`
 }
 
 type PromptConfig struct {
@@ -67,10 +84,12 @@ type PromptConfig struct {
 	CodingRetryPrefixes              []string `json:"coding_retry_prefixes,omitempty"`
 	GeneralRetryPrefixes             []string `json:"general_retry_prefixes,omitempty"`
 	DirectAnswerRetryPrefixes        []string `json:"direct_answer_retry_prefixes,omitempty"`
+	precomputedAllRetryPrefixes      []string `json:"-"`
 }
 
 type NotionAccount struct {
 	Email               string `json:"email"`
+	emailKey            string `json:"-"`
 	ProbeJSON           string `json:"probe_json,omitempty"`
 	ProfileDir          string `json:"profile_dir,omitempty"`
 	StorageStatePath    string `json:"storage_state_path,omitempty"`
@@ -153,10 +172,14 @@ type AppConfig struct {
 	Admin                 AdminConfig          `json:"admin"`
 	Responses             ResponsesConfig      `json:"responses"`
 	Storage               StorageConfig        `json:"storage"`
+	Limits                LimitsConfig         `json:"limits,omitempty"`
 	Prompt                PromptConfig         `json:"prompt"`
 	Features              FeatureConfig        `json:"features"`
 	LoginHelper           LoginHelperConfig    `json:"login_helper"`
 	SessionRefresh        SessionRefreshConfig `json:"session_refresh"`
+	Dispatch              DispatchConfig       `json:"dispatch"`
+	Browser               BrowserConfig        `json:"browser,omitempty"`
+	Debug                 DebugConfig          `json:"debug"`
 	Accounts              []NotionAccount      `json:"accounts,omitempty"`
 	Models                []ModelDefinition    `json:"models,omitempty"`
 	ModelAliases          map[string]string    `json:"model_aliases,omitempty"`
@@ -418,6 +441,9 @@ func defaultConfig() AppConfig {
 		Storage: StorageConfig{
 			PersistConversations: true,
 		},
+		Limits: LimitsConfig{
+			MaxRequestBodyBytes: 4 * 1024 * 1024,
+		},
 		Prompt: PromptConfig{
 			Profile:                          "cognitive_reframing",
 			FallbackProfiles:                 []string{"toolbox_capability_expansion"},
@@ -439,6 +465,13 @@ func defaultConfig() AppConfig {
 			StartupCheck:     true,
 			RetryOnAuthError: true,
 			AutoSwitch:       true,
+		},
+		Dispatch: DispatchConfig{
+			ProbeCacheTTLSeconds: 45,
+		},
+		Debug: DebugConfig{
+			PprofEnabled: false,
+			PprofAddr:    "127.0.0.1:6060",
 		},
 		Features: FeatureConfig{
 			UseWebSearch:               true,
@@ -500,6 +533,10 @@ func normalizeConfig(cfg AppConfig) AppConfig {
 	if cfg.PollMaxRounds <= 0 {
 		cfg.PollMaxRounds = 40
 	}
+	cfg.Debug.PprofAddr = strings.TrimSpace(cfg.Debug.PprofAddr)
+	if cfg.Debug.PprofAddr == "" {
+		cfg.Debug.PprofAddr = "127.0.0.1:6060"
+	}
 	if cfg.StreamChunkRunes <= 0 {
 		cfg.StreamChunkRunes = 24
 	}
@@ -511,6 +548,9 @@ func normalizeConfig(cfg AppConfig) AppConfig {
 	}
 	if cfg.Responses.StoreTTLSeconds <= 0 {
 		cfg.Responses.StoreTTLSeconds = 3600
+	}
+	if cfg.Limits.MaxRequestBodyBytes <= 0 {
+		cfg.Limits.MaxRequestBodyBytes = 4 * 1024 * 1024
 	}
 	cfg.Prompt.Profile = strings.TrimSpace(cfg.Prompt.Profile)
 	if cfg.Prompt.Profile == "" {
@@ -535,6 +575,7 @@ func normalizeConfig(cfg AppConfig) AppConfig {
 	cfg.Prompt.CodingRetryPrefixes = normalizePromptTextList(cfg.Prompt.CodingRetryPrefixes)
 	cfg.Prompt.GeneralRetryPrefixes = normalizePromptTextList(cfg.Prompt.GeneralRetryPrefixes)
 	cfg.Prompt.DirectAnswerRetryPrefixes = normalizePromptTextList(cfg.Prompt.DirectAnswerRetryPrefixes)
+	cfg.Prompt.precomputedAllRetryPrefixes = buildPromptGuardAllRetryPrefixes(cfg.Prompt)
 	cfg.Storage.SQLitePath = strings.TrimSpace(cfg.Storage.SQLitePath)
 	if cfg.Storage.SQLitePath == "" && strings.TrimSpace(cfg.ConfigPath) != "" {
 		cfg.Storage.SQLitePath = "data/notion2api.sqlite"
@@ -547,6 +588,15 @@ func normalizeConfig(cfg AppConfig) AppConfig {
 	}
 	if cfg.SessionRefresh.IntervalSec <= 0 {
 		cfg.SessionRefresh.IntervalSec = 900
+	}
+	if cfg.Dispatch.ProbeCacheTTLSeconds < 0 {
+		cfg.Dispatch.ProbeCacheTTLSeconds = 0
+	}
+	if cfg.Browser.HelperPoolSize < 0 {
+		cfg.Browser.HelperPoolSize = 0
+	}
+	if cfg.Browser.HelperPoolSize > 8 {
+		cfg.Browser.HelperPoolSize = 8
 	}
 	cfg.Features.SearchScopes = normalizeStringList(cfg.Features.SearchScopes)
 	cfg.Features.AISurface = strings.TrimSpace(cfg.Features.AISurface)
@@ -566,6 +616,7 @@ func normalizeConfig(cfg AppConfig) AppConfig {
 	cfg.ActiveAccount = strings.TrimSpace(cfg.ActiveAccount)
 	for i := range cfg.Accounts {
 		cfg.Accounts[i].Email = strings.TrimSpace(cfg.Accounts[i].Email)
+		cfg.Accounts[i].emailKey = canonicalEmailKey(cfg.Accounts[i].Email)
 		cfg.Accounts[i].ProbeJSON = strings.TrimSpace(cfg.Accounts[i].ProbeJSON)
 		cfg.Accounts[i].ProfileDir = strings.TrimSpace(cfg.Accounts[i].ProfileDir)
 		cfg.Accounts[i].StorageStatePath = strings.TrimSpace(cfg.Accounts[i].StorageStatePath)
@@ -797,6 +848,9 @@ func parseCLI() AppConfig {
 	timeoutSec := flag.Int("timeout-sec", 0, "request timeout sec")
 	pollIntervalSec := flag.Float64("poll-interval-sec", 0, "poll interval sec")
 	pollMaxRounds := flag.Int("poll-max-rounds", 0, "poll max rounds")
+	pprofEnabled := flag.Bool("pprof-enabled", false, "enable pprof debug server")
+	pprofAddr := flag.String("pprof-addr", "", "pprof listen address")
+	maxRequestBodyBytes := flag.Int64("max-request-body-bytes", 0, "max request body size in bytes for JSON API endpoints")
 	userName := flag.String("user-name", "", "override user name")
 	spaceName := flag.String("space-name", "", "override space name")
 	flag.Parse()
@@ -869,6 +923,15 @@ func parseCLI() AppConfig {
 	}
 	if *pollMaxRounds > 0 {
 		cfg.PollMaxRounds = *pollMaxRounds
+	}
+	if *pprofEnabled {
+		cfg.Debug.PprofEnabled = true
+	}
+	if strings.TrimSpace(*pprofAddr) != "" {
+		cfg.Debug.PprofAddr = strings.TrimSpace(*pprofAddr)
+	}
+	if *maxRequestBodyBytes > 0 {
+		cfg.Limits.MaxRequestBodyBytes = *maxRequestBodyBytes
 	}
 	if strings.TrimSpace(*userName) != "" {
 		cfg.UserName = *userName

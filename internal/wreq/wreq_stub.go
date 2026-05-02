@@ -5,6 +5,7 @@ package wreq
 import (
 	"context"
 	"errors"
+	"io"
 )
 
 var ErrNotLinked = errors.New("wreq: built without wreq_ffi tag; use node-wreq fallback")
@@ -21,26 +22,29 @@ type RequestSpec struct {
 	Method      string     `json:"method"`
 	URL         string     `json:"url"`
 	Headers     [][]string `json:"headers,omitempty"`
-	BodyB64     string     `json:"body_b64,omitempty"`
+	Body        []byte     `json:"-"`
 	TimeoutSecs uint64     `json:"timeout_secs,omitempty"`
 }
 
 type Response struct {
-	OK       bool       `json:"ok"`
-	Status   int        `json:"status"`
-	Headers  [][]string `json:"headers"`
-	BodyB64  string     `json:"body_b64"`
-	FinalURL string     `json:"final_url"`
-	Error    string     `json:"error,omitempty"`
+	Status   int
+	Headers  [][]string
+	FinalURL string
 }
 
-func (r *Response) Body() ([]byte, error) { return nil, ErrNotLinked }
+func (r *Response) Read(_ []byte) (int, error) { return 0, io.EOF }
+func (r *Response) Body() ([]byte, error)      { return nil, ErrNotLinked }
+func (r *Response) Close() error               { return nil }
 
 type Client struct{}
 
 func New(_ ClientConfig) (*Client, error) { return nil, ErrNotLinked }
 
 func (c *Client) Close() error { return nil }
+
+func (c *Client) Begin(_ context.Context, _ RequestSpec) (*Response, error) {
+	return nil, ErrNotLinked
+}
 
 func (c *Client) Do(_ context.Context, _ RequestSpec) (*Response, error) {
 	return nil, ErrNotLinked

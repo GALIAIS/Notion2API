@@ -1,0 +1,11 @@
+{
+  "model": "auto",
+  "stream": false,
+  "messages": [
+    {
+      "role": "user",
+      "content": "Write a short status update in 2 sentences."
+    }
+  ]
+}
+

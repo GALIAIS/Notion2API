@@ -9,6 +9,11 @@ import (
 	"time"
 )
 
+var (
+	testHookTryRefreshAccount func(context.Context, AppConfig, NotionAccount) (AppConfig, error)
+	testHookSaveAndApply      func(*ServerState, AppConfig) error
+)
+
 func sessionRefreshNowISO() string {
 	return time.Now().Format(time.RFC3339)
 }
@@ -278,11 +283,25 @@ func (s *ServerState) RefreshSession(ctx context.Context, reason string) error {
 		return fmt.Errorf("no active account configured for session refresh")
 	}
 
-	updatedCfg, err := s.tryRefreshAccount(ctx, cfg, account)
+	tryRefresh := s.tryRefreshAccount
+	if testHookTryRefreshAccount != nil {
+		tryRefresh = testHookTryRefreshAccount
+	}
+	saveAndApply := s.SaveAndApply
+	if testHookSaveAndApply != nil {
+		saveAndApply = func(cfg AppConfig) error {
+			return testHookSaveAndApply(s, cfg)
+		}
+	}
+
+	updatedCfg, err := tryRefresh(ctx, cfg, account)
 	if err == nil {
-		if saveErr := s.SaveAndApply(updatedCfg); saveErr != nil {
+		if saveErr := saveAndApply(updatedCfg); saveErr != nil {
 			s.setSessionRefreshRuntime(saveErr)
 			return saveErr
+		}
+		if s.DispatchProbeCache != nil {
+			s.DispatchProbeCache.invalidateAll()
 		}
 		s.setSessionRefreshRuntime(nil)
 		return nil
@@ -290,33 +309,36 @@ func (s *ServerState) RefreshSession(ctx context.Context, reason string) error {
 
 	if !refreshCfg.AutoSwitch {
 		s.setSessionRefreshRuntime(err)
-		_ = s.SaveAndApply(updatedCfg)
+		_ = saveAndApply(updatedCfg)
 		return fmt.Errorf("refresh active account %s failed (%s): %w", account.Email, reason, err)
 	}
 
 	lastErr := err
 	for _, candidate := range cfg.Accounts {
-		if canonicalEmailKey(candidate.Email) == canonicalEmailKey(account.Email) {
+		if getAccountEmailKey(candidate) == getAccountEmailKey(account) {
 			continue
 		}
 		if !fileExists(ensureAccountPaths(cfg, candidate).ProbeJSON) {
 			continue
 		}
-		nextCfg, nextErr := s.tryRefreshAccount(ctx, updatedCfg, candidate)
+		nextCfg, nextErr := tryRefresh(ctx, updatedCfg, candidate)
 		if nextErr != nil {
 			lastErr = nextErr
 			updatedCfg = nextCfg
 			continue
 		}
-		if saveErr := s.SaveAndApply(nextCfg); saveErr != nil {
+		if saveErr := saveAndApply(nextCfg); saveErr != nil {
 			s.setSessionRefreshRuntime(saveErr)
 			return saveErr
+		}
+		if s.DispatchProbeCache != nil {
+			s.DispatchProbeCache.invalidateAll()
 		}
 		s.setSessionRefreshRuntime(nil)
 		return nil
 	}
 
-	_ = s.SaveAndApply(updatedCfg)
+	_ = saveAndApply(updatedCfg)
 	s.setSessionRefreshRuntime(lastErr)
 	return fmt.Errorf("session refresh failed after trying active account and fallbacks (%s): %w", reason, lastErr)
 }

@@ -96,6 +96,23 @@ func promptGuardProfileChain(cfg AppConfig, hasTools bool) []promptProfile {
 	return chain[:limit]
 }
 
+func buildPromptGuardAllRetryPrefixes(promptCfg PromptConfig) []string {
+	totalCap := len(defaultPromptCodingRetryPrefixes()) +
+		len(defaultPromptGeneralRetryPrefixes()) +
+		len(defaultPromptDirectAnswerRetryPrefixes()) +
+		len(promptCfg.CodingRetryPrefixes) +
+		len(promptCfg.GeneralRetryPrefixes) +
+		len(promptCfg.DirectAnswerRetryPrefixes)
+	out := make([]string, 0, totalCap)
+	out = append(out, defaultPromptCodingRetryPrefixes()...)
+	out = append(out, defaultPromptGeneralRetryPrefixes()...)
+	out = append(out, defaultPromptDirectAnswerRetryPrefixes()...)
+	out = append(out, promptCfg.CodingRetryPrefixes...)
+	out = append(out, promptCfg.GeneralRetryPrefixes...)
+	out = append(out, promptCfg.DirectAnswerRetryPrefixes...)
+	return out
+}
+
 func resolvePromptGuardProfile(cfg AppConfig, request PromptRunRequest) (promptProfile, int) {
 	chain := promptGuardProfileChain(cfg, false)
 	if len(chain) == 0 {
@@ -175,11 +192,10 @@ func promptGuardPrepareRequest(cfg AppConfig, request PromptRunRequest) PromptRu
 
 func promptGuardStripRetryPrefixes(cfg AppConfig, text string) string {
 	current := text
-	all := append(append([]string{}, defaultPromptCodingRetryPrefixes()...), defaultPromptGeneralRetryPrefixes()...)
-	all = append(all, defaultPromptDirectAnswerRetryPrefixes()...)
-	all = append(all, cfg.Prompt.CodingRetryPrefixes...)
-	all = append(all, cfg.Prompt.GeneralRetryPrefixes...)
-	all = append(all, cfg.Prompt.DirectAnswerRetryPrefixes...)
+	all := cfg.Prompt.precomputedAllRetryPrefixes
+	if len(all) == 0 {
+		all = buildPromptGuardAllRetryPrefixes(cfg.Prompt)
+	}
 	matched := true
 	for matched {
 		matched = false
@@ -193,13 +209,14 @@ func promptGuardStripRetryPrefixes(cfg AppConfig, text string) string {
 	return current
 }
 
+var promptGuardCodingRequestPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)\b(code|coding|program|function|class|bug|debug|refactor|api|sdk|javascript|typescript|python|golang|rust|docker|sql|bash|shell|json|yaml|repository|repo|frontend|backend|server|client)\b`),
+	regexp.MustCompile(`代码|编程|开发|函数|脚本|调试|报错|异常|接口|部署|构建|数据库|仓库|前端|后端|服务端|客户端|测试|日志`),
+	regexp.MustCompile("```"),
+}
+
 func promptGuardLooksLikeCodingRequest(text string) bool {
-	patterns := []*regexp.Regexp{
-		regexp.MustCompile(`(?i)\b(code|coding|program|function|class|bug|debug|refactor|api|sdk|javascript|typescript|python|golang|rust|docker|sql|bash|shell|json|yaml|repository|repo|frontend|backend|server|client)\b`),
-		regexp.MustCompile(`代码|编程|开发|函数|脚本|调试|报错|异常|接口|部署|构建|数据库|仓库|前端|后端|服务端|客户端|测试|日志`),
-		regexp.MustCompile("```"),
-	}
-	for _, pattern := range patterns {
+	for _, pattern := range promptGuardCodingRequestPatterns {
 		if pattern.MatchString(text) {
 			return true
 		}

@@ -2,13 +2,11 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { DatabaseZap, Layers3, Sparkles } from 'lucide-react';
-import { EmptyHint, InfoCard, KeyValueGrid, PanelHeader, StatCard } from '@/components/admin/shared';
+import { EmptyHint, InfoCard, KeyValueGrid, MetaTile, PanelHeader, StatCard } from '@/components/admin/shared';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import type { ModelItem } from '@/lib/services/admin/types';
 import { cn } from '@/lib/utils';
-
-const META_TILE_CLASS = 'surface-subtle px-4 py-4';
 
 function uniqueValues(items: Array<string | undefined>) {
   return [...new Set(items.filter(Boolean))];
@@ -53,7 +51,7 @@ export function ModelsPanel({
       </div>
 
       <div className="grid gap-6 xl:grid-cols-[minmax(320px,360px)_minmax(0,1fr)]">
-        <InfoCard title="模型列表" description="选择模型后查看映射详情。">
+        <InfoCard title="模型列表" description={`共 ${models.length} 个模型，选择后查看映射详情。`}>
           {models.length ? (
             <ScrollArea className="console-list-scroll pretty-scroll pr-3">
               <div className="space-y-3 pb-1">
@@ -65,8 +63,10 @@ export function ModelsPanel({
                       type="button"
                       onClick={() => setSelectedModelId(model.id)}
                       className={cn(
-                        'w-full rounded-lg border px-4 py-4 text-left transition-colors',
-                        selected ? 'border-primary/40 bg-primary/5 shadow-sm' : 'border-border/70 bg-background hover:bg-muted/40',
+                        'w-full rounded-lg border px-4 py-4 text-left transition-all',
+                        selected
+                          ? 'border-primary/40 bg-[color-mix(in_oklab,var(--primary)_10%,var(--card))] shadow-soft'
+                          : 'border-border/70 bg-card hover:border-primary/20 hover:bg-muted/40',
                       )}
                     >
                       <div className="flex items-start justify-between gap-3">
@@ -95,10 +95,30 @@ export function ModelsPanel({
         </InfoCard>
 
         {selectedModel ? (
-          <div className="space-y-6">
+          <div className="min-w-0 space-y-6">
             <InfoCard
               title={selectedModel.name || selectedModel.id}
               description="当前路由模型的映射信息。"
+              actions={
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge className="normal-case tracking-normal px-3 py-1.5">
+                    <DatabaseZap className="size-3.5" />
+                    {selectedModel.enabled === false ? 'disabled' : 'enabled'}
+                  </Badge>
+                  {selectedModel.beta ? (
+                    <Badge variant="secondary" className="normal-case tracking-normal px-3 py-1.5">
+                      <Sparkles className="size-3.5" />
+                      beta
+                    </Badge>
+                  ) : null}
+                  {selectedModel.group ? (
+                    <Badge variant="outline" className="normal-case tracking-normal px-3 py-1.5">
+                      <Layers3 className="size-3.5" />
+                      {selectedModel.group}
+                    </Badge>
+                  ) : null}
+                </div>
+              }
             >
               <KeyValueGrid
                 items={[
@@ -112,38 +132,11 @@ export function ModelsPanel({
               />
             </InfoCard>
 
-            <InfoCard title="状态标签" description="查看启用状态、Beta 标记和归类。">
-              <div className="flex flex-wrap gap-3">
-                <Badge className="normal-case tracking-normal px-3 py-1.5">
-                  <DatabaseZap className="size-3.5" />
-                  {selectedModel.enabled === false ? 'disabled' : 'enabled'}
-                </Badge>
-                {selectedModel.beta ? (
-                  <Badge variant="secondary" className="normal-case tracking-normal px-3 py-1.5">
-                    <Sparkles className="size-3.5" />
-                    beta
-                  </Badge>
-                ) : null}
-                {selectedModel.group ? (
-                  <Badge variant="outline" className="normal-case tracking-normal px-3 py-1.5">
-                    <Layers3 className="size-3.5" />
-                    {selectedModel.group}
-                  </Badge>
-                ) : null}
-              </div>
-              <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                <div className={META_TILE_CLASS}>
-                  <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-muted-foreground">路由 ID</div>
-                  <div className="mt-2 value-box pretty-scroll">{selectedModel.id}</div>
-                </div>
-                <div className={META_TILE_CLASS}>
-                  <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-muted-foreground">内部模型</div>
-                  <div className="mt-2 value-box pretty-scroll">{selectedModel.notion_model || '-'}</div>
-                </div>
-                <div className={META_TILE_CLASS}>
-                  <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-muted-foreground">归类</div>
-                  <div className="mt-2 value-box pretty-scroll">{[selectedModel.family || '-', selectedModel.group || '-'].join(' · ')}</div>
-                </div>
+            <InfoCard title="映射详情" description="用于调试与授权路由的详细状态。">
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                <MetaTile label="路由 ID" scrollable value={selectedModel.id} />
+                <MetaTile label="内部模型" scrollable value={selectedModel.notion_model || '-'} />
+                <MetaTile label="归类" scrollable value={[selectedModel.family || '-', selectedModel.group || '-'].join(' · ')} />
               </div>
             </InfoCard>
           </div>

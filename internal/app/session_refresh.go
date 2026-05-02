@@ -80,14 +80,15 @@ func loadSessionInfoForAccountRefresh(cfg AppConfig, account NotionAccount) (Ses
 
 func buildRefreshedSession(ctx context.Context, cfg AppConfig, account NotionAccount, prior SessionInfo) (SessionInfo, error) {
 	upstream := cfg.NotionUpstream()
-	client, err := newNotionLoginHTTPClient(helperTimeout(cfg), upstream)
+	resolver := NewProxyResolver(cfg)
+	session, err := newNotionLoginSession(helperTimeout(cfg), upstream, resolver, account.Email)
 	if err != nil {
 		return SessionInfo{}, err
 	}
-	restoreProbeCookies(client.Jar, upstream.HomeURL(), prior.Cookies)
-	restoreProbeCookies(client.Jar, upstream.LoginURL(), prior.Cookies)
+	restoreProbeCookies(session.Jar, upstream.HomeURL(), prior.Cookies)
+	restoreProbeCookies(session.Jar, upstream.LoginURL(), prior.Cookies)
 
-	bootstrap, err := fetchLoginBootstrap(ctx, client, upstream)
+	bootstrap, err := fetchLoginBootstrap(ctx, session, upstream)
 	if err != nil {
 		return SessionInfo{}, err
 	}
@@ -95,19 +96,19 @@ func buildRefreshedSession(ctx context.Context, cfg AppConfig, account NotionAcc
 	userID := firstNonEmpty(
 		prior.UserID,
 		account.UserID,
-		probeCookieValue(probeCookiesFromJar(client.Jar, upstream.HomeURL()), "notion_user_id"),
-		probeCookieValue(probeCookiesFromJar(client.Jar, upstream.LoginURL()), "notion_user_id"),
+		probeCookieValue(probeCookiesFromJar(session.Jar, upstream.HomeURL()), "notion_user_id"),
+		probeCookieValue(probeCookiesFromJar(session.Jar, upstream.LoginURL()), "notion_user_id"),
 	)
 	if userID == "" {
 		return SessionInfo{}, fmt.Errorf("notion_user_id missing during session refresh")
 	}
-	spaces, err := getSpacesInitial(ctx, client, upstream, clientVersion, userID)
+	spaces, err := getSpacesInitial(ctx, session, upstream, clientVersion, userID)
 	if err != nil {
 		return SessionInfo{}, err
 	}
-	cookies := probeCookiesFromJar(client.Jar, upstream.HomeURL())
+	cookies := probeCookiesFromJar(session.Jar, upstream.HomeURL())
 	if len(cookies) == 0 {
-		cookies = probeCookiesFromJar(client.Jar, upstream.LoginURL())
+		cookies = probeCookiesFromJar(session.Jar, upstream.LoginURL())
 	}
 	if len(cookies) == 0 {
 		return SessionInfo{}, fmt.Errorf("cookie jar empty after session refresh")

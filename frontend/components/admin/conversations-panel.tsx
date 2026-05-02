@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { toast } from 'sonner';
 import { RefreshCcw, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -11,6 +11,7 @@ import {
   FileChips,
   InfoCard,
   KeyValueGrid,
+  MetaTile,
   PanelHeader,
   StatCard,
   StatusPill,
@@ -19,10 +20,6 @@ import {
 import type { ConversationDetail, ConversationSummary } from '@/lib/services/admin/types';
 import { cn } from '@/lib/utils';
 
-const STREAM_BADGE_CLASS = 'status-chip text-sm';
-const IDLE_ITEM_CLASS = 'border bg-background hover:bg-muted/50';
-const ACTIVE_ITEM_CLASS = 'border-primary/30 bg-primary/8 text-foreground';
-const META_TILE_CLASS = 'surface-subtle px-4 py-4';
 const ACCOUNT_FILTER_ALL = '__all__';
 const ACCOUNT_FILTER_UNKNOWN = '__unknown__';
 
@@ -172,7 +169,7 @@ export function ConversationsPanel({
         description="查看最近线程，按账号筛选，并同步删除远端会话。"
         actions={
           <>
-            <div className={STREAM_BADGE_CLASS}>{streamState}</div>
+            <div className="status-chip text-sm">{streamState}</div>
             <Button variant="outline" disabled={busy} onClick={() => void onRefresh()}>
               <RefreshCcw className="size-4" />
               刷新会话
@@ -226,8 +223,8 @@ export function ConversationsPanel({
           }
         >
           {selectedIDs.length ? (
-            <div className="mb-4 rounded-lg border border-dashed border-primary/30 bg-primary/6 px-4 py-3 text-sm">
-              已选 {selectedIDs.length} 条 · 本地 {selectedLocalCount} · 涉及 Notion {selectedRemoteCount}
+            <div className="mb-4 rounded-lg border border-dashed border-primary/30 bg-[color-mix(in_oklab,var(--primary)_8%,var(--card))] px-4 py-3 text-sm leading-6">
+              已选 <span className="font-semibold text-foreground">{selectedIDs.length}</span> 条 · 本地 {selectedLocalCount} · 涉及 Notion {selectedRemoteCount}
               {hasRunningSelection ? '；运行中的会话不能删除。' : '；删除会同步删除 Notion 对话。'}
             </div>
           ) : null}
@@ -238,10 +235,16 @@ export function ConversationsPanel({
                 {filteredConversations.map((item) => {
                   const originLabel = conversationOriginLabel(item.origin);
                   const isChecked = selectedIDs.includes(item.id);
+                  const isActive = item.id === selectedConversationId;
                   return (
                     <div
                       key={item.id}
-                      className={cn('rounded-lg border px-4 py-4 transition-colors', item.id === selectedConversationId ? ACTIVE_ITEM_CLASS : IDLE_ITEM_CLASS)}
+                      className={cn(
+                        'rounded-lg border px-4 py-4 transition-all',
+                        isActive
+                          ? 'border-primary/40 bg-[color-mix(in_oklab,var(--primary)_10%,var(--card))] shadow-soft'
+                          : 'border-border/70 bg-card hover:border-primary/20 hover:bg-muted/40',
+                      )}
                     >
                       <div className="flex items-start gap-3">
                         <input
@@ -253,9 +256,9 @@ export function ConversationsPanel({
 
                         <button type="button" className="min-w-0 flex-1 text-left" onClick={() => void onSelect(item.id)}>
                           <div className="flex items-start justify-between gap-3">
-                            <div className="min-w-0">
+                            <div className="min-w-0 space-y-2">
                               <div className="line-clamp-2 text-sm font-semibold leading-6">{item.title || 'Untitled conversation'}</div>
-                              <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                              <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                                 <span className="rounded-full border px-2 py-0.5">{originLabel}</span>
                                 {item.account_email ? <span className="rounded-full border px-2 py-0.5">{item.account_email}</span> : null}
                                 {item.created_by_display_name ? <span>{item.created_by_display_name}</span> : null}
@@ -264,10 +267,10 @@ export function ConversationsPanel({
                             <StatusPill status={item.status} />
                           </div>
 
-                          <div className={cn('mt-2 text-sm', item.id === selectedConversationId ? 'text-foreground/80' : 'text-muted-foreground')}>
+                          <div className={cn('mt-2 text-xs', isActive ? 'text-foreground/70' : 'text-muted-foreground')}>
                             {[item.source || '-', item.transport || '-', item.model || '-'].join(' · ')}
                           </div>
-                          <div className={cn('mt-3 line-clamp-4 text-sm leading-6', item.id === selectedConversationId ? 'text-foreground/90' : 'text-foreground/80')}>
+                          <div className={cn('mt-3 line-clamp-3 text-sm leading-6', isActive ? 'text-foreground/90' : 'text-foreground/80')}>
                             {item.preview || '暂无预览'}
                           </div>
                           <div className="mt-3 text-xs text-muted-foreground">更新于 {formatMaybeDate(item.updated_at || item.created_at)}</div>
@@ -314,6 +317,12 @@ export function ConversationsPanel({
                   { label: '更新时间', value: formatMaybeDate(activeConversation.updated_at) },
                 ]}
               />
+
+              <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                <MetaTile label="当前会话" scrollable value={activeConversation.id} />
+                <MetaTile label="会话来源" value={conversationOriginLabel(activeConversation.origin)} />
+                <MetaTile label="消息条数" value={String(conversationMessages.length)} />
+              </div>
             </InfoCard>
 
             <InfoCard
@@ -324,16 +333,24 @@ export function ConversationsPanel({
                 <ScrollArea className="console-detail-scroll pretty-scroll pr-4">
                   <div className="space-y-4 pb-2">
                     {conversationMessages.map((message, index) => {
-                      const tone = message.role === 'user' ? 'border-primary/20 bg-primary/8' : 'bg-background/80';
+                      const isUser = message.role === 'user';
                       return (
-                        <div key={message.id || `${message.role}-${index}`} className={cn('rounded-xl border p-4 shadow-sm', tone)}>
+                        <div
+                          key={message.id || `${message.role}-${index}`}
+                          className={cn(
+                            'rounded-xl border p-4 shadow-soft',
+                            isUser
+                              ? 'border-primary/25 bg-[color-mix(in_oklab,var(--primary)_8%,var(--card))]'
+                              : 'border-border/70 bg-card',
+                          )}
+                        >
                           <div className="mb-3 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-                            <div className="text-sm font-semibold uppercase tracking-[0.18em] text-muted-foreground">{message.role || 'assistant'}</div>
+                            <div className="section-eyebrow">{message.role || 'assistant'}</div>
                             <div className="text-xs text-muted-foreground">
                               {message.status || '-'} · {formatMaybeDate(message.updated_at || message.created_at)}
                             </div>
                           </div>
-                          <div className="rounded-md border bg-background px-4 py-3 text-sm leading-7 whitespace-pre-wrap break-words">
+                          <div className="rounded-lg border bg-background px-4 py-3 text-sm leading-7 whitespace-pre-wrap break-words">
                             {message.content || '[无文本内容]'}
                           </div>
                           {message.attachments?.length ? (
@@ -349,21 +366,6 @@ export function ConversationsPanel({
               ) : (
                 <EmptyHint title="暂无消息" description="该会话详情还没被加载，或目前只有摘要信息。" />
               )}
-            </InfoCard>
-
-            <InfoCard title="会话摘要" description="当前会话关键字段。">
-              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                {[
-                  ['当前会话', activeConversation.id],
-                  ['会话来源', conversationOriginLabel(activeConversation.origin)],
-                  ['消息条数', String(conversationMessages.length)],
-                ].map(([label, value]) => (
-                  <div key={label} className={META_TILE_CLASS}>
-                    <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-muted-foreground">{label}</div>
-                    <div className="mt-2 value-box pretty-scroll">{value}</div>
-                  </div>
-                ))}
-              </div>
             </InfoCard>
           </div>
         ) : (

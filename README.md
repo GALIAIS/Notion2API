@@ -15,16 +15,14 @@
 
 ### 本地运行
 
-```powershell
-Set-Location 'E:\WorkSpace\sub2api\chatgpt_register\Nation2API'
-& 'D:\Go\bin\go.exe' run .\cmd\notion2api --config .\config.example.json
+```bash
+go run ./cmd/notion2api --config ./config.example.json
 ```
 
 ### 本地构建
 
-```powershell
-Set-Location 'E:\WorkSpace\sub2api\chatgpt_register\Nation2API'
-& 'D:\Go\bin\go.exe' build .\cmd\notion2api
+```bash
+go build ./cmd/notion2api
 ```
 
 ## Docker 部署
@@ -47,17 +45,75 @@ docker compose -f docker-compose.prod.yml up -d --build
 - Health：`http://127.0.0.1:8787/healthz`
 - WebUI：`http://127.0.0.1:8787/admin`
 
+## 代理与 Resin 粘性代理
+
+### 代理模式
+
+`proxy_mode` 支持：
+
+- `off`：关闭代理
+- `env`：从环境变量读取（优先 `N2A_*`）
+- `http`：固定 HTTP 代理
+- `https`：按协议拆分 HTTP/HTTPS 代理
+- `socks5`：SOCKS5/SOCKS5H 代理
+- `resin_forward`：Resin 粘性代理转发
+
+### 环境变量优先级（`proxy_mode=env`）
+
+HTTPS 请求优先顺序：
+
+1. `N2A_PROXY_HTTPS_URL`
+2. `N2A_UPSTREAM_PROXY_HTTPS_URL`
+3. `N2A_PROXY_URL`
+4. `N2A_UPSTREAM_PROXY_URL`
+5. `HTTPS_PROXY` / `https_proxy`
+6. `ALL_PROXY` / `all_proxy`
+
+HTTP 请求优先顺序：
+
+1. `N2A_PROXY_HTTP_URL`
+2. `N2A_UPSTREAM_PROXY_HTTP_URL`
+3. `N2A_PROXY_URL`
+4. `N2A_UPSTREAM_PROXY_URL`
+5. `HTTP_PROXY` / `http_proxy`
+6. `ALL_PROXY` / `all_proxy`
+
+也可以直接用环境变量覆盖配置文件中的代理字段：
+
+- `N2A_PROXY_MODE`
+- `N2A_PROXY_URL`
+- `N2A_PROXY_HTTP_URL`
+- `N2A_PROXY_HTTPS_URL`
+- `N2A_RESIN_ENABLED`
+- `N2A_RESIN_URL`
+- `N2A_RESIN_PLATFORM`
+- `N2A_RESIN_MODE`
+
+### Resin 粘性代理（按账号隔离）
+
+每个账号都可以独立设置粘性身份：
+
+- `accounts[].sticky_proxy_account`：显式设置粘性账号名（推荐）
+- 未设置时会回退到邮箱派生值
+
+当启用 `resin_forward` 时：
+
+- 代理认证用户名格式：`<resin_platform>.<sticky_proxy_account>`
+- 密码使用 `resin_url` 中 token
+- 请求会附带 `X-Resin-Account` 头
+
 ## 配置说明
 
 建议优先检查这些字段：
 
 - `api_key`：OpenAI 兼容接口密钥
 - `admin.password`：WebUI 登录密码
-- `upstream_base_url`：上游站点地址
-- `upstream_origin`：上游请求 `Origin`
-- `accounts`：账号池配置
-- `active_account`：默认激活账号
-- `storage.sqlite_path`：SQLite 数据库路径
+- `upstream_base_url` / `upstream_origin`
+- `proxy_mode` / `proxy_url` / `proxy_http_url` / `proxy_https_url`
+- `resin_enabled` / `resin_url` / `resin_platform` / `resin_mode`
+- `accounts[*].sticky_proxy_account`
+- `accounts` / `active_account`
+- `storage.sqlite_path`
 
 可直接参考：
 
@@ -67,8 +123,8 @@ docker compose -f docker-compose.prod.yml up -d --build
 ## 使用建议
 
 - 首次启动后先访问 `/admin`，确认账号、配置和连通性是否正常
-- 常规本地使用直接运行二进制或 `go run` 即可
-- 需要容器化部署时优先使用 Docker Compose
+- 修改管理台前端后需执行 `npm --prefix ./frontend run build:static`
+- 调整会话延续与存储时，建议同步检查 `internal/app/sqlite_store.go` 的 schema 与迁移兼容性
 
 ## 开源协议
 

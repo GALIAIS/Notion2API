@@ -155,6 +155,7 @@ export interface AccountItem {
   last_relogin_at?: string;
   priority?: number;
   hourly_quota?: number;
+  max_concurrency?: number;
   quota_limited?: boolean;
   remaining_quota?: number;
   cooldown_active?: boolean;

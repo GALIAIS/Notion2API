@@ -43,6 +43,7 @@ frontend/out/
 *.spec.tsx
 __tests__/
 WEBUI_DEVELOPMENT_GUIDE.md
+.serena/
 
 # Rust FFI build artifacts (v2 wreq-ffi)
 wreq-ffi/target/

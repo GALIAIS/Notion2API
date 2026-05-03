@@ -2,7 +2,8 @@ FROM --platform=$BUILDPLATFORM node:22-bookworm AS frontend-builder
 
 WORKDIR /frontend
 COPY frontend/package.json frontend/package-lock.json ./
-RUN npm ci
+RUN --mount=type=cache,target=/root/.npm,sharing=locked \
+    npm ci
 COPY frontend ./
 RUN npm run build
 
@@ -13,7 +14,10 @@ ARG TARGETARCH
 ARG TARGETOS=linux
 WORKDIR /src
 
-RUN apt-get update -o Acquire::Retries=5 \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+    && apt-get update -o Acquire::Retries=5 \
     && apt-get install -y -o Acquire::Retries=5 --no-install-recommends \
         cmake perl build-essential libclang-dev clang lld file \
         gcc-x86-64-linux-gnu g++-x86-64-linux-gnu \
@@ -39,6 +43,16 @@ ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc \
     AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar
 
 ENV CARGO_TARGET_DIR=/cargo-target
+
+COPY wreq-ffi/Cargo.toml ./wreq-ffi/Cargo.toml
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    set -eux; \
+    RUST_TARGET=$(cat /tmp/rust_target); \
+    mkdir -p ./wreq-ffi/src; \
+    touch ./wreq-ffi/src/lib.rs; \
+    cargo fetch --manifest-path ./wreq-ffi/Cargo.toml --target "${RUST_TARGET}"
 
 COPY wreq-ffi ./wreq-ffi
 
@@ -78,7 +92,10 @@ ARG TARGETPLATFORM
 ARG TARGETOS
 ARG TARGETARCH
 
-RUN apt-get update -o Acquire::Retries=5 \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+    && apt-get update -o Acquire::Retries=5 \
     && apt-get install -y -o Acquire::Retries=5 --no-install-recommends \
         file \
         gcc-x86-64-linux-gnu g++-x86-64-linux-gnu \
@@ -122,23 +139,30 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 
 FROM node:22-bookworm-slim
 
+ARG TARGETARCH
 ENV TZ=Asia/Shanghai
 ENV NODE_PATH=/opt/notion2api-helper/node_modules
 ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 WORKDIR /app
 
-RUN apt-get update \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+    && apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates tzdata curl tini \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb \
     && mkdir -p /opt/notion2api-helper /app/config /app/data/notion_accounts /app/static
 
-RUN cd /opt/notion2api-helper \
-    && npm pack node-wreq@2.2.1 \
-    && tar -xf node-wreq-2.2.1.tgz \
-    && mkdir -p "$NODE_PATH" \
-    && mv package "$NODE_PATH/node-wreq" \
-    && rm -f node-wreq-2.2.1.tgz \
+RUN --mount=type=cache,target=/root/.npm,sharing=locked \
+    cd /opt/notion2api-helper \
+    && npm install --omit=dev --no-audit --no-fund --include=optional --no-save node-wreq@2.2.1 \
     && test -d "$NODE_PATH/node-wreq" \
+    && test -d "$NODE_PATH/@node-wreq" \
+    && case "${TARGETARCH}" in \
+         amd64) test -d "$NODE_PATH/@node-wreq/linux-x64-gnu" ;; \
+         arm64) test -d "$NODE_PATH/@node-wreq/linux-arm64-gnu" ;; \
+         *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+       esac \
     && npm cache clean --force >/dev/null 2>&1
 
 COPY --from=builder /out/notion2api /app/notion2api

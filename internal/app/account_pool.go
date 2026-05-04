@@ -253,10 +253,10 @@ func (a *App) runPromptWithSession(ctx context.Context, cfg AppConfig, session S
 	if a.runPromptWithSessionOverride != nil {
 		return a.runPromptWithSessionOverride(ctx, cfg, session, request, onDelta)
 	}
-	wreqClientNewTotalMetric.Add("standard", 1)
+	transportClientNewTotalMetric.Add("standard", 1)
 	client := newNotionAIClient(session, cfg, accountEmail)
 	if onDelta != nil {
-		wreqClientNewTotalMetric.Add("streaming", 1)
+		transportClientNewTotalMetric.Add("streaming", 1)
 		client = newNotionAIStreamingClient(session, cfg, accountEmail)
 	}
 	execute := func(ctx context.Context, current PromptRunRequest, forward func(string) error) (InferenceResult, error) {
@@ -275,10 +275,10 @@ func (a *App) runPromptWithSessionWithSink(ctx context.Context, cfg AppConfig, s
 	if a.runPromptWithSessionOverride != nil {
 		return a.runPromptWithSessionOverride(ctx, cfg, session, request, sink.Text)
 	}
-	wreqClientNewTotalMetric.Add("streaming", 1)
+	transportClientNewTotalMetric.Add("streaming", 1)
 	client := newNotionAIStreamingClient(session, cfg, accountEmail)
 	if sink.Text == nil && sink.Reasoning == nil && sink.ReasoningWarmup == nil && sink.KeepAlive == nil {
-		wreqClientNewTotalMetric.Add("standard", 1)
+		transportClientNewTotalMetric.Add("standard", 1)
 		client = newNotionAIClient(session, cfg, accountEmail)
 	}
 	if sink.Reasoning != nil || sink.ReasoningWarmup != nil || sink.KeepAlive != nil {

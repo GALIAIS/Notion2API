@@ -39,6 +39,8 @@ docker compose up -d --build
 docker compose -f docker-compose.prod.yml up -d --build
 ```
 
+本地从源码开发需 Go `1.25.0+`（`go.mod` 已声明）。
+
 ## 默认入口
 
 - API：`http://127.0.0.1:8787/v1/*`

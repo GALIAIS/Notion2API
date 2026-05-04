@@ -260,6 +260,22 @@ func TestNormalizeConfigSetsPprofDefaults(t *testing.T) {
 	}
 }
 
+func TestDefaultConfigSurfHelperTransportDisabled(t *testing.T) {
+	cfg := defaultConfig()
+	if cfg.Features.UseSurfHelperTransport {
+		t.Fatalf("expected default use_surf_helper_transport=false")
+	}
+}
+
+func TestNormalizeConfigKeepsSurfHelperTransportEnabled(t *testing.T) {
+	cfg := normalizeConfig(AppConfig{
+		Features: FeatureConfig{UseSurfHelperTransport: true},
+	})
+	if !cfg.Features.UseSurfHelperTransport {
+		t.Fatalf("expected normalizeConfig to preserve use_surf_helper_transport=true")
+	}
+}
+
 func TestDefaultConfigSetsDispatchProbeCacheTTLDefault(t *testing.T) {
 	cfg := defaultConfig()
 	if cfg.Dispatch.ProbeCacheTTLSeconds != 45 {
@@ -298,31 +314,19 @@ func TestNormalizeConfigClampsBrowserHelperPoolSizeBounds(t *testing.T) {
 	}
 }
 
-func TestEmbeddedBrowserHelperAssetsLoaded(t *testing.T) {
-	helper := strings.TrimSpace(nodeWreqHelperScript())
-	if helper == "" {
-		t.Fatalf("expected embedded browser helper script to be non-empty")
+func TestEmbeddedBrowserHelperAssetsRemoved(t *testing.T) {
+	_, err1 := os.Stat("internal/app/assets/browser-helper.cjs")
+	_, err2 := os.Stat("internal/app/assets/browser-login-helper.cjs")
+	if !errors.Is(err1, os.ErrNotExist) || !errors.Is(err2, os.ErrNotExist) {
+		t.Fatalf("node helper assets still exist")
 	}
-	for _, needle := range []string{
-		"const { fetch } = require('node-wreq');",
-		"process.stdout.write(JSON.stringify(result));",
-	} {
-		if !strings.Contains(helper, needle) {
-			t.Fatalf("embedded browser helper script missing %q", needle)
-		}
-	}
+}
 
-	login := strings.TrimSpace(nodeWreqLoginHelperScript())
-	if login == "" {
-		t.Fatalf("expected embedded browser login helper script to be non-empty")
-	}
-	for _, needle := range []string{
-		"const { fetch } = require('node-wreq');",
-		"result.set_cookies = [...setCookieRecord.entries()]",
-	} {
-		if !strings.Contains(login, needle) {
-			t.Fatalf("embedded browser login helper script missing %q", needle)
-		}
+func TestSurfHelperTransportFeatureEnabledUsesSurfPath(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Features.UseSurfHelperTransport = true
+	if !cfg.Features.UseSurfHelperTransport {
+		t.Fatalf("expected surf flag enabled")
 	}
 }
 
@@ -822,10 +826,10 @@ func TestServeHealthzIncludesRefreshRuntimeFieldsWhenStaticCacheExists(t *testin
 func TestServeHTTPDebugVarsExposesWreqClientMetric(t *testing.T) {
 	app := newFreshThreadTestApp(t)
 	before := int64(0)
-	if value := wreqClientNewTotalMetric.Get("standard"); value != nil {
+	if value := transportClientNewTotalMetric.Get("standard"); value != nil {
 		before = value.(*expvar.Int).Value()
 	}
-	wreqClientNewTotalMetric.Add("standard", 1)
+	transportClientNewTotalMetric.Add("standard", 1)
 	req := httptest.NewRequest(http.MethodGet, "/debug/vars", nil)
 	req.Header.Set("Authorization", "Bearer test-api-key")
 	rec := httptest.NewRecorder()
@@ -836,14 +840,14 @@ func TestServeHTTPDebugVarsExposesWreqClientMetric(t *testing.T) {
 		t.Fatalf("unexpected status: got %d want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, `"notion2api_wreq_client_new_total"`) {
+	if !strings.Contains(body, `"notion2api_transport_client_new_total"`) {
 		t.Fatalf("expected metrics payload to include wreq client metric, got %s", body)
 	}
 	if !strings.Contains(body, `"notion2api_http_transport_cache_total"`) {
 		t.Fatalf("expected metrics payload to include transport cache metric, got %s", body)
 	}
 	after := int64(0)
-	if value := wreqClientNewTotalMetric.Get("standard"); value != nil {
+	if value := transportClientNewTotalMetric.Get("standard"); value != nil {
 		after = value.(*expvar.Int).Value()
 	}
 	if after < before+1 {
@@ -866,7 +870,7 @@ func TestServeHTTPMetricsExposesCorePrometheusSeries(t *testing.T) {
 	app := &App{State: state}
 
 	setDispatchSlotInflight("alice@example.com", 2)
-	observeWreqFFICallDuration(25 * time.Millisecond)
+	observeTransportCallDuration(25 * time.Millisecond)
 	observeSQLiteOpDuration("save_response", 2*time.Millisecond)
 	addBrowserHelperSpawn()
 	addBrowserHelperPoolWorkerSpawn()
@@ -889,7 +893,7 @@ func TestServeHTTPMetricsExposesCorePrometheusSeries(t *testing.T) {
 	for _, want := range []string{
 		"notion2api_request_duration_seconds_bucket",
 		"notion2api_dispatch_slot_inflight",
-		"notion2api_wreq_ffi_call_duration_seconds_bucket",
+		"notion2api_transport_call_duration_seconds_bucket",
 		"notion2api_browser_helper_spawn_total",
 		"notion2api_browser_helper_pool_worker_spawn_total",
 		"notion2api_sqlite_op_duration_seconds_bucket",

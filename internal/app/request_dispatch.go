@@ -18,7 +18,7 @@ const (
 
 var errDispatchCapacityExceeded = errors.New("dispatch capacity exceeded")
 
-var wreqClientNewTotalMetric = expvar.NewMap("notion2api_wreq_client_new_total")
+var transportClientNewTotalMetric = expvar.NewMap("notion2api_transport_client_new_total")
 
 type probeCacheEntry struct {
 	lastChecked time.Time

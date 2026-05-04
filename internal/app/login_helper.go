@@ -162,17 +162,18 @@ func writeLoginStorageState(path string, payload loginStorageState) error {
 	return writePrettyJSONFile(path, payload)
 }
 
-func newNotionLoginSession(timeout time.Duration, upstream NotionUpstream, resolver *ProxyResolver, accountEmail string) (*loginHTTPSession, error) {
+func newNotionLoginSession(timeout time.Duration, upstream NotionUpstream, resolver *ProxyResolver, accountEmail string, cfg AppConfig) (*loginHTTPSession, error) {
 	jar, err := cookiejar.New(nil)
 	if err != nil {
 		return nil, err
 	}
 	return &loginHTTPSession{
-		Client:        &http.Client{Timeout: timeout, Jar: jar},
-		ProxyResolver: resolver,
-		AccountEmail:  strings.TrimSpace(accountEmail),
-		Timeout:       timeout,
-		Upstream:      upstream,
+		Client:                 &http.Client{Timeout: timeout, Jar: jar},
+		ProxyResolver:          resolver,
+		AccountEmail:           strings.TrimSpace(accountEmail),
+		Timeout:                timeout,
+		Upstream:               upstream,
+		UseSurfHelperTransport: cfg.Features.UseSurfHelperTransport,
 	}, nil
 }
 
@@ -348,7 +349,7 @@ func fetchLoginBootstrap(ctx context.Context, session *loginHTTPSession, upstrea
 		"accept-language": "zh-CN,zh;q=0.9",
 		"user-agent":      notionLoginUA,
 	}
-	status, respHeaders, body, err := loginWreqDoRequest(ctx, session, http.MethodGet, upstream.LoginURL(), headers, nil)
+	status, respHeaders, body, err := loginTransportDoRequest(ctx, session, http.MethodGet, upstream.LoginURL(), headers, nil)
 	if err != nil {
 		return loginBootstrap{}, err
 	}
@@ -395,7 +396,7 @@ func postNotionLoginJSON(ctx context.Context, session *loginHTTPSession, upstrea
 		"notion-audit-log-platform":   "web",
 		"x-notion-active-user-header": strings.TrimSpace(activeUserID),
 	}
-	status, respHeaders, respBody, err := loginWreqDoRequest(ctx, session, http.MethodPost, targetURL, headers, body)
+	status, respHeaders, respBody, err := loginTransportDoRequest(ctx, session, http.MethodPost, targetURL, headers, body)
 	if err != nil {
 		return nil, err
 	}
@@ -613,7 +614,7 @@ func StartEmailLogin(ctx context.Context, cfg AppConfig, req LoginStartRequest) 
 	upstream := cfg.NotionUpstream()
 	resolver := NewProxyResolver(cfg)
 
-	session, err := newNotionLoginSession(helperTimeout(cfg), upstream, resolver, firstNonEmpty(req.AccountEmail, req.Email))
+	session, err := newNotionLoginSession(helperTimeout(cfg), upstream, resolver, firstNonEmpty(req.AccountEmail, req.Email), cfg)
 	if err != nil {
 		return failLoginState(req.PendingPath, state, err)
 	}
@@ -682,7 +683,7 @@ func VerifyEmailLogin(ctx context.Context, cfg AppConfig, req LoginVerifyRequest
 	upstream := cfg.NotionUpstream()
 	resolver := NewProxyResolver(cfg)
 
-	session, err := newNotionLoginSession(helperTimeout(cfg), upstream, resolver, firstNonEmpty(req.AccountEmail, req.Email))
+	session, err := newNotionLoginSession(helperTimeout(cfg), upstream, resolver, firstNonEmpty(req.AccountEmail, req.Email), cfg)
 	if err != nil {
 		return failLoginState(req.PendingPath, pending, err)
 	}

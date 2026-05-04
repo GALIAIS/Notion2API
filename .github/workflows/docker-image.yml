@@ -17,7 +17,6 @@ on:
       - "internal/**"
       - "static/**"
       - "frontend/**"
-      - "wreq-ffi/**"
       - ".dockerignore"
       - ".github/workflows/docker-image.yml"
   workflow_dispatch:

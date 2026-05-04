@@ -22,6 +22,7 @@ type FeatureConfig struct {
 	UseReadOnlyMode            bool     `json:"use_read_only_mode"`
 	ForceDisableUpstreamEdits  bool     `json:"force_disable_upstream_edits"`
 	ForceFreshThreadPerRequest bool     `json:"force_fresh_thread_per_request"`
+	UseSurfHelperTransport     bool     `json:"use_surf_helper_transport,omitempty"`
 	WriterMode                 bool     `json:"writer_mode"`
 	EnableGenerateImage        bool     `json:"enable_generate_image"`
 	EnableCsvAttachmentSupport bool     `json:"enable_csv_attachment_support"`
@@ -478,6 +479,7 @@ func defaultConfig() AppConfig {
 			UseReadOnlyMode:            false,
 			ForceDisableUpstreamEdits:  false,
 			ForceFreshThreadPerRequest: false,
+			UseSurfHelperTransport:     false,
 			WriterMode:                 false,
 			EnableGenerateImage:        true,
 			EnableCsvAttachmentSupport: true,

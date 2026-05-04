@@ -53,7 +53,7 @@ type sqliteDurationKey struct {
 }
 
 var requestDurationBuckets = []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10}
-var wreqFFICallDurationBuckets = []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5}
+var transportCallDurationBuckets = []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5}
 var sqliteOpDurationBuckets = []float64{0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1}
 
 var (
@@ -63,8 +63,8 @@ var (
 	dispatchInflightMu sync.Mutex
 	dispatchInflight   = map[string]int64{}
 
-	wreqFFICallMu     sync.Mutex
-	wreqFFICallSeries = newHistogramSeries(len(wreqFFICallDurationBuckets))
+	transportCallMu     sync.Mutex
+	transportCallSeries = newHistogramSeries(len(transportCallDurationBuckets))
 
 	browserSpawnMu    sync.Mutex
 	browserSpawnTotal uint64
@@ -85,9 +85,9 @@ func resetMetricsForTest() {
 	dispatchInflight = map[string]int64{}
 	dispatchInflightMu.Unlock()
 
-	wreqFFICallMu.Lock()
-	wreqFFICallSeries = newHistogramSeries(len(wreqFFICallDurationBuckets))
-	wreqFFICallMu.Unlock()
+	transportCallMu.Lock()
+	transportCallSeries = newHistogramSeries(len(transportCallDurationBuckets))
+	transportCallMu.Unlock()
 
 	browserSpawnMu.Lock()
 	browserSpawnTotal = 0
@@ -158,14 +158,14 @@ func syncDispatchSlotInflightFromSlots(next map[string]*accountSlot) {
 	}
 }
 
-func observeWreqFFICallDuration(elapsed time.Duration) {
+func observeTransportCallDuration(elapsed time.Duration) {
 	seconds := elapsed.Seconds()
 	if seconds < 0 {
 		seconds = 0
 	}
-	wreqFFICallMu.Lock()
-	wreqFFICallSeries.observe(seconds, wreqFFICallDurationBuckets)
-	wreqFFICallMu.Unlock()
+	transportCallMu.Lock()
+	transportCallSeries.observe(seconds, transportCallDurationBuckets)
+	transportCallMu.Unlock()
 }
 
 func addBrowserHelperSpawn() {
@@ -257,9 +257,9 @@ func writePrometheusMetrics(w http.ResponseWriter) {
 	_, _ = fmt.Fprintln(w, "# TYPE notion2api_dispatch_slot_inflight gauge")
 	writeDispatchInflightGauge(w)
 
-	_, _ = fmt.Fprintln(w, "# HELP notion2api_wreq_ffi_call_duration_seconds Duration of wreq-based helper calls in seconds.")
-	_, _ = fmt.Fprintln(w, "# TYPE notion2api_wreq_ffi_call_duration_seconds histogram")
-	writeWreqFFICallHistogram(w)
+	_, _ = fmt.Fprintln(w, "# HELP notion2api_transport_call_duration_seconds Duration of transport helper calls in seconds.")
+	_, _ = fmt.Fprintln(w, "# TYPE notion2api_transport_call_duration_seconds histogram")
+	writeTransportCallHistogram(w)
 
 	_, _ = fmt.Fprintln(w, "# HELP notion2api_browser_helper_spawn_total Total spawned browser helper subprocesses.")
 	_, _ = fmt.Fprintln(w, "# TYPE notion2api_browser_helper_spawn_total counter")
@@ -333,12 +333,12 @@ func writeDispatchInflightGauge(w http.ResponseWriter) {
 	}
 }
 
-func writeWreqFFICallHistogram(w http.ResponseWriter) {
-	wreqFFICallMu.Lock()
-	series := *wreqFFICallSeries
-	series.buckets = append([]uint64(nil), wreqFFICallSeries.buckets...)
-	wreqFFICallMu.Unlock()
-	writeHistogramSeries(w, "notion2api_wreq_ffi_call_duration_seconds", "", wreqFFICallDurationBuckets, &series)
+func writeTransportCallHistogram(w http.ResponseWriter) {
+	transportCallMu.Lock()
+	series := *transportCallSeries
+	series.buckets = append([]uint64(nil), transportCallSeries.buckets...)
+	transportCallMu.Unlock()
+	writeHistogramSeries(w, "notion2api_transport_call_duration_seconds", "", transportCallDurationBuckets, &series)
 }
 
 func writeBrowserHelperSpawnCounter(w http.ResponseWriter) {

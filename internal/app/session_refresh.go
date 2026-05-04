@@ -86,7 +86,7 @@ func loadSessionInfoForAccountRefresh(cfg AppConfig, account NotionAccount) (Ses
 func buildRefreshedSession(ctx context.Context, cfg AppConfig, account NotionAccount, prior SessionInfo) (SessionInfo, error) {
 	upstream := cfg.NotionUpstream()
 	resolver := NewProxyResolver(cfg)
-	session, err := newNotionLoginSession(helperTimeout(cfg), upstream, resolver, account.Email)
+	session, err := newNotionLoginSession(helperTimeout(cfg), upstream, resolver, account.Email, cfg)
 	if err != nil {
 		return SessionInfo{}, err
 	}

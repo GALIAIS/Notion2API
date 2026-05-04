@@ -165,7 +165,7 @@ func discoverImportedAccountMetadata(ctx context.Context, cfg AppConfig, account
 	}
 	upstream := cfg.NotionUpstream()
 	resolver := NewProxyResolver(cfg)
-	session, err := newNotionLoginSession(helperTimeout(cfg), upstream, resolver, accountEmail)
+	session, err := newNotionLoginSession(helperTimeout(cfg), upstream, resolver, accountEmail, cfg)
 	if err != nil {
 		return meta, err
 	}

@@ -1157,7 +1157,7 @@ func (c *NotionAIClient) runInferenceTranscriptWithFallback(ctx context.Context,
 	}
 	callStartedAt := time.Now()
 	parsed, err := c.runInferenceTranscriptHTTP(ctx, payload, threadID, sink)
-	observeWreqFFICallDuration(time.Since(callStartedAt))
+	observeTransportCallDuration(time.Since(callStartedAt))
 	if c.Config.DebugUpstream {
 		log.Printf("[debug_upstream] runInferenceTranscript http done thread_id=%s line_count=%d message_ids=%d err=%v", threadID, parsed.LineCount, len(parsed.MessageIDs), err)
 	}

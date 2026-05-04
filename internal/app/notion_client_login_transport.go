@@ -2,16 +2,14 @@ package app
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
-	"os/exec"
 	"strings"
 	"time"
 )
 
-type loginWreqRequest struct {
+type loginTransportRequest struct {
 	Method           string            `json:"method"`
 	URL              string            `json:"url"`
 	Headers          map[string]string `json:"headers"`
@@ -22,7 +20,7 @@ type loginWreqRequest struct {
 	RequestTimeoutMS int               `json:"request_timeout_ms"`
 }
 
-type loginWreqResponse struct {
+type loginTransportResponse struct {
 	Status      int               `json:"status"`
 	ContentType string            `json:"content_type"`
 	Headers     map[string]string `json:"headers"`
@@ -32,47 +30,38 @@ type loginWreqResponse struct {
 
 type loginHTTPSession struct {
 	*http.Client
-	ProxyResolver *ProxyResolver
-	AccountEmail  string
-	Timeout       time.Duration
-	Upstream      NotionUpstream
+	ProxyResolver          *ProxyResolver
+	AccountEmail           string
+	Timeout                time.Duration
+	Upstream               NotionUpstream
+	UseSurfHelperTransport bool
 }
 
-func runLoginHelperRequest(ctx context.Context, request loginWreqRequest) (*loginWreqResponse, error) {
-	if _, err := exec.LookPath("node"); err != nil {
-		return nil, &browserHelperUnavailableError{Message: "node not found"}
-	}
-	requestPayload, err := json.Marshal(request)
-	if err != nil {
-		return nil, err
-	}
-	stdoutBytes, err := executeHelperSubprocess(ctx, "node", ".cjs", nodeWreqLoginHelperScript(), requestPayload, browserHelperNodeEnv())
-	if err != nil {
-		return nil, err
-	}
-	var response loginWreqResponse
-	if err := json.Unmarshal(stdoutBytes, &response); err != nil {
-		return nil, fmt.Errorf("login helper returned invalid json: %w", err)
-	}
-	return &response, nil
-}
+var (
+	loginTransportRunSurfRequest     = runLoginHelperRequestWithSurf
+	loginTransportRunFallbackRequest = runLoginHelperRequestWithSurf
+)
 
-func loginWreqDoRequest(ctx context.Context, session *loginHTTPSession, method string, targetURL string, headers map[string]string, body []byte) (int, http.Header, []byte, error) {
+func loginTransportDoRequest(ctx context.Context, session *loginHTTPSession, method string, targetURL string, headers map[string]string, body []byte) (int, http.Header, []byte, error) {
 	if session == nil {
 		return 0, nil, nil, fmt.Errorf("login session is nil")
 	}
-	request := buildLoginWreqRequest(session, method, targetURL, headers, body)
-	resp, err := runLoginHelperRequest(ctx, request)
+	request := buildLoginTransportRequest(session, method, targetURL, headers, body)
+	var (
+		resp *loginTransportResponse
+		err  error
+	)
+	resp, err = loginTransportRunSurfRequest(ctx, request)
 	if err != nil {
 		return 0, nil, nil, err
 	}
 	if session.Client != nil {
-		applyLoginWreqSetCookies(session.Jar, targetURL, resp.SetCookies)
+		applyLoginTransportSetCookies(session.Jar, targetURL, resp.SetCookies)
 	}
-	return resp.Status, loginWreqHTTPHeader(resp.Headers), []byte(resp.Body), nil
+	return resp.Status, loginTransportHTTPHeader(resp.Headers), []byte(resp.Body), nil
 }
 
-func buildLoginWreqRequest(session *loginHTTPSession, method string, targetURL string, headers map[string]string, body []byte) loginWreqRequest {
+func buildLoginTransportRequest(session *loginHTTPSession, method string, targetURL string, headers map[string]string, body []byte) loginTransportRequest {
 	cookies := []ProbeCookie{}
 	if session != nil && session.Client != nil {
 		cookies = probeCookiesFromJar(session.Jar, targetURL)
@@ -99,19 +88,19 @@ func buildLoginWreqRequest(session *loginHTTPSession, method string, targetURL s
 		}
 		cleanHeaders[k] = v
 	}
-	return loginWreqRequest{
+	return loginTransportRequest{
 		Method:           strings.ToUpper(strings.TrimSpace(method)),
 		URL:              targetURL,
 		Headers:          cleanHeaders,
 		Body:             string(body),
 		Cookies:          cookies,
-		BrowserProfile:   notionWreqDefaultBrowserProfile,
+		BrowserProfile:   notionTransportDefaultBrowserProfile,
 		Proxy:            proxyValue,
 		RequestTimeoutMS: timeoutMS,
 	}
 }
 
-func applyLoginWreqSetCookies(jar http.CookieJar, targetURL string, setCookies []ProbeCookie) {
+func applyLoginTransportSetCookies(jar http.CookieJar, targetURL string, setCookies []ProbeCookie) {
 	if jar == nil || len(setCookies) == 0 {
 		return
 	}
@@ -132,7 +121,7 @@ func applyLoginWreqSetCookies(jar http.CookieJar, targetURL string, setCookies [
 	}
 }
 
-func loginWreqHTTPHeader(headers map[string]string) http.Header {
+func loginTransportHTTPHeader(headers map[string]string) http.Header {
 	out := http.Header{}
 	for k, v := range headers {
 		out.Set(k, v)

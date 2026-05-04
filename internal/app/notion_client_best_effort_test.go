@@ -214,11 +214,11 @@ func TestRunPromptWithSessionIncrementsWreqClientMetric(t *testing.T) {
 		}},
 	}
 	beforeStandard := int64(0)
-	if v := wreqClientNewTotalMetric.Get("standard"); v != nil {
+	if v := transportClientNewTotalMetric.Get("standard"); v != nil {
 		beforeStandard = v.(*expvar.Int).Value()
 	}
 	beforeStreaming := int64(0)
-	if v := wreqClientNewTotalMetric.Get("streaming"); v != nil {
+	if v := transportClientNewTotalMetric.Get("streaming"); v != nil {
 		beforeStreaming = v.(*expvar.Int).Value()
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -234,11 +234,11 @@ func TestRunPromptWithSessionIncrementsWreqClientMetric(t *testing.T) {
 	}
 
 	afterStandard := int64(0)
-	if v := wreqClientNewTotalMetric.Get("standard"); v != nil {
+	if v := transportClientNewTotalMetric.Get("standard"); v != nil {
 		afterStandard = v.(*expvar.Int).Value()
 	}
 	afterStreaming := int64(0)
-	if v := wreqClientNewTotalMetric.Get("streaming"); v != nil {
+	if v := transportClientNewTotalMetric.Get("streaming"); v != nil {
 		afterStreaming = v.(*expvar.Int).Value()
 	}
 	if afterStandard-beforeStandard < 1 {

@@ -42,10 +42,7 @@ ENV CARGO_TARGET_DIR=/cargo-target
 
 COPY wreq-ffi ./wreq-ffi
 
-RUN --mount=type=cache,id=cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry \
-    --mount=type=cache,id=cargo-git-${TARGETARCH},target=/usr/local/cargo/git \
-    --mount=type=cache,id=cargo-target-${TARGETARCH},target=/cargo-target,sharing=locked \
-    set -eux; \
+RUN set -eux; \
     RUST_TARGET=$(cat /tmp/rust_target); \
     case "${TARGETARCH}" in \
       amd64) CC=x86_64-linux-gnu-gcc; CXX=x86_64-linux-gnu-g++; AR=x86_64-linux-gnu-ar ;; \
@@ -87,9 +84,7 @@ RUN apt-get update -o Acquire::Retries=5 \
 
 WORKDIR /src
 COPY go.mod go.sum ./
-RUN --mount=type=cache,id=go-mod-${TARGETARCH},target=/go/pkg/mod \
-    --mount=type=cache,id=go-build-${TARGETARCH},target=/root/.cache/go-build \
-    go mod download
+RUN go mod download
 
 COPY cmd ./cmd
 COPY internal ./internal
@@ -98,9 +93,7 @@ COPY --from=frontend-builder /frontend/out /src/static/admin
 COPY --from=rust-builder /out/libwreq_ffi.a /src/wreq-ffi/target/release/libwreq_ffi.a
 COPY --from=rust-builder /out/wreq_ffi.h    /src/wreq-ffi/include/wreq_ffi.h
 
-RUN --mount=type=cache,id=go-mod-${TARGETARCH},target=/go/pkg/mod \
-    --mount=type=cache,id=go-build-${TARGETARCH},target=/root/.cache/go-build \
-    set -eux; \
+RUN set -eux; \
     case "${TARGETARCH}" in \
       amd64) CC=x86_64-linux-gnu-gcc; CXX=x86_64-linux-gnu-g++ ;; \
       arm64) CC=aarch64-linux-gnu-gcc; CXX=aarch64-linux-gnu-g++ ;; \

@@ -58,6 +58,7 @@ type ConversationEntry struct {
 	InputAttachments  []ConversationAttachment `json:"input_attachments,omitempty"`
 	OutputAttachments []UploadedAttachment     `json:"output_attachments,omitempty"`
 	Messages          []ConversationMessage    `json:"messages,omitempty"`
+	cachedPreview     string                   `json:"-"`
 }
 
 type ConversationSummary struct {
@@ -133,6 +134,7 @@ func newConversationStoreFromEntries(entries []ConversationEntry) *ConversationS
 	store := newConversationStore()
 	for _, entry := range entries {
 		cloned := cloneConversationEntry(&entry)
+		refreshConversationDerivedFields(&cloned)
 		store.items[cloned.ID] = &cloned
 		store.order = append(store.order, cloned.ID)
 	}
@@ -285,17 +287,17 @@ func cloneConversationEntry(entry *ConversationEntry) ConversationEntry {
 	return out
 }
 
+func copyConversationEntryValue(entry *ConversationEntry) ConversationEntry {
+	if entry == nil {
+		return ConversationEntry{}
+	}
+	return *entry
+}
+
 func buildConversationSummary(entry *ConversationEntry) ConversationSummary {
-	preview := ""
-	for i := len(entry.Messages) - 1; i >= 0; i-- {
-		text := collapseWhitespace(entry.Messages[i].Content)
-		if text == "" && len(entry.Messages[i].Attachments) > 0 {
-			text = fmt.Sprintf("%d attachments", len(entry.Messages[i].Attachments))
-		}
-		if text != "" {
-			preview = truncateRunes(text, 96)
-			break
-		}
+	preview := entry.cachedPreview
+	if preview == "" && len(entry.Messages) > 0 {
+		preview = conversationPreviewFromMessages(entry.Messages)
 	}
 	return ConversationSummary{
 		ID:                    entry.ID,
@@ -325,6 +327,26 @@ func buildConversationSummary(entry *ConversationEntry) ConversationSummary {
 		InputAttachmentCount:  len(entry.InputAttachments),
 		OutputAttachmentCount: len(entry.OutputAttachments),
 	}
+}
+
+func conversationPreviewFromMessages(messages []ConversationMessage) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		text := collapseWhitespace(messages[i].Content)
+		if text == "" && len(messages[i].Attachments) > 0 {
+			text = fmt.Sprintf("%d attachments", len(messages[i].Attachments))
+		}
+		if text != "" {
+			return truncateRunes(text, 96)
+		}
+	}
+	return ""
+}
+
+func refreshConversationDerivedFields(entry *ConversationEntry) {
+	if entry == nil {
+		return
+	}
+	entry.cachedPreview = conversationPreviewFromMessages(entry.Messages)
 }
 
 func conversationMessageSegments(entry *ConversationEntry) []conversationPromptSegment {
@@ -410,7 +432,7 @@ func (s *ConversationStore) Create(req ConversationCreateRequest) ConversationEn
 	if id == "" {
 		id = "conv_" + strings.ReplaceAll(randomUUID(), "-", "")
 	}
-	entry := &ConversationEntry{
+	entry := ConversationEntry{
 		ID:                id,
 		Title:             conversationTitle(req.Prompt, req.InputAttachments),
 		Origin:            "local",
@@ -440,17 +462,19 @@ func (s *ConversationStore) Create(req ConversationCreateRequest) ConversationEn
 			Attachments: cloneConversationAttachments(entry.InputAttachments),
 		})
 	}
+	refreshConversationDerivedFields(&entry)
 
 	s.mu.Lock()
 	if s.items[id] != nil {
 		id = "conv_" + strings.ReplaceAll(randomUUID(), "-", "")
 		entry.ID = id
 	}
-	s.items[id] = entry
+	entryPtr := &entry
+	s.items[id] = entryPtr
 	s.order = append([]string{id}, s.order...)
 	s.trimLocked()
-	cloned := cloneConversationEntry(entry)
-	summary := buildConversationSummary(entry)
+	cloned := copyConversationEntryValue(entryPtr)
+	summary := buildConversationSummary(entryPtr)
 	s.mu.Unlock()
 
 	s.broadcast(ConversationEvent{
@@ -458,7 +482,7 @@ func (s *ConversationStore) Create(req ConversationCreateRequest) ConversationEn
 		ConversationID: id,
 		At:             now,
 		Summary:        &summary,
-		Conversation:   &cloned,
+		Conversation:   entryPtr,
 	})
 	return cloned
 }
@@ -469,39 +493,41 @@ func (s *ConversationStore) Continue(conversationID string, req ConversationCrea
 		cloned  ConversationEntry
 		summary ConversationSummary
 		ok      bool
+		entry   *ConversationEntry
 	)
 	s.mu.Lock()
-	entry := s.items[conversationID]
-	if entry != nil {
-		entry.Source = firstNonEmpty(req.Source, entry.Source)
-		entry.Transport = firstNonEmpty(req.Transport, entry.Transport)
+	current := s.items[conversationID]
+	if current != nil {
+		next := cloneConversationEntry(current)
+		next.Source = firstNonEmpty(req.Source, next.Source)
+		next.Transport = firstNonEmpty(req.Transport, next.Transport)
 		if req.Ephemeral {
-			entry.Ephemeral = true
-			entry.EphemeralReason = firstNonEmpty(strings.TrimSpace(req.EphemeralReason), entry.EphemeralReason)
+			next.Ephemeral = true
+			next.EphemeralReason = firstNonEmpty(strings.TrimSpace(req.EphemeralReason), next.EphemeralReason)
 			if !req.AutoDeleteAt.IsZero() {
-				entry.AutoDeleteAt = timePointer(req.AutoDeleteAt)
+				next.AutoDeleteAt = timePointer(req.AutoDeleteAt)
 			}
 		}
 		if clean := strings.TrimSpace(req.Model); clean != "" {
-			entry.Model = clean
+			next.Model = clean
 		}
 		if clean := strings.TrimSpace(req.NotionModel); clean != "" {
-			entry.NotionModel = clean
+			next.NotionModel = clean
 		}
-		entry.UseWebSearch = req.UseWebSearch
-		entry.Status = "running"
-		entry.Error = ""
-		entry.InputAttachments = cloneConversationAttachments(req.InputAttachments)
-		entry.UpdatedAt = now
-		if len(entry.Messages) > 0 {
-			last := &entry.Messages[len(entry.Messages)-1]
+		next.UseWebSearch = req.UseWebSearch
+		next.Status = "running"
+		next.Error = ""
+		next.InputAttachments = cloneConversationAttachments(req.InputAttachments)
+		next.UpdatedAt = now
+		if len(next.Messages) > 0 {
+			last := &next.Messages[len(next.Messages)-1]
 			if last.Role == "assistant" && last.Status != "completed" {
 				last.Status = "failed"
 				last.UpdatedAt = now
 			}
 		}
 		if strings.TrimSpace(req.Prompt) != "" || len(req.InputAttachments) > 0 {
-			entry.Messages = append(entry.Messages, ConversationMessage{
+			next.Messages = append(next.Messages, ConversationMessage{
 				ID:          "msg_user_" + strings.ReplaceAll(randomUUID(), "-", ""),
 				Role:        "user",
 				Status:      "completed",
@@ -511,8 +537,11 @@ func (s *ConversationStore) Continue(conversationID string, req ConversationCrea
 				Attachments: cloneConversationAttachments(req.InputAttachments),
 			})
 		}
+		refreshConversationDerivedFields(&next)
+		entry = &next
+		s.items[conversationID] = entry
 		s.moveToFrontLocked(conversationID)
-		cloned = cloneConversationEntry(entry)
+		cloned = copyConversationEntryValue(entry)
 		summary = buildConversationSummary(entry)
 		ok = true
 	}
@@ -525,7 +554,7 @@ func (s *ConversationStore) Continue(conversationID string, req ConversationCrea
 		ConversationID: conversationID,
 		At:             now,
 		Summary:        &summary,
-		Conversation:   &cloned,
+		Conversation:   entry,
 	})
 	return cloned, nil
 }
@@ -553,17 +582,22 @@ func (s *ConversationStore) SetEnvelopeIDs(conversationID string, responseID str
 	var (
 		summary ConversationSummary
 		ok      bool
+		entry   *ConversationEntry
 	)
 	s.mu.Lock()
-	entry := s.items[conversationID]
-	if entry != nil {
+	current := s.items[conversationID]
+	if current != nil {
+		next := cloneConversationEntry(current)
 		if strings.TrimSpace(responseID) != "" {
-			entry.ResponseID = strings.TrimSpace(responseID)
+			next.ResponseID = strings.TrimSpace(responseID)
 		}
 		if strings.TrimSpace(completionID) != "" {
-			entry.CompletionID = strings.TrimSpace(completionID)
+			next.CompletionID = strings.TrimSpace(completionID)
 		}
-		entry.UpdatedAt = now
+		next.UpdatedAt = now
+		refreshConversationDerivedFields(&next)
+		entry = &next
+		s.items[conversationID] = entry
 		s.moveToFrontLocked(conversationID)
 		summary = buildConversationSummary(entry)
 		ok = true
@@ -575,6 +609,7 @@ func (s *ConversationStore) SetEnvelopeIDs(conversationID string, responseID str
 			ConversationID: conversationID,
 			At:             now,
 			Summary:        &summary,
+			Conversation:   entry,
 		})
 	}
 }
@@ -587,21 +622,26 @@ func (s *ConversationStore) AppendAssistantDelta(conversationID string, delta st
 	now := time.Now().UTC()
 	var (
 		summary ConversationSummary
-		msg     ConversationMessage
+		msg     *ConversationMessage
 		ok      bool
+		entry   *ConversationEntry
 	)
 	s.mu.Lock()
-	entry := s.items[conversationID]
-	if entry != nil {
-		assistant := s.ensureAssistantMessageLocked(entry, now)
+	current := s.items[conversationID]
+	if current != nil {
+		next := cloneConversationEntry(current)
+		assistant := s.ensureAssistantMessageLocked(&next, now)
 		assistant.Content += delta
 		assistant.Status = "streaming"
 		assistant.UpdatedAt = now
-		entry.Status = "running"
-		entry.UpdatedAt = now
+		next.Status = "running"
+		next.UpdatedAt = now
+		refreshConversationDerivedFields(&next)
+		entry = &next
+		s.items[conversationID] = entry
 		s.moveToFrontLocked(conversationID)
 		summary = buildConversationSummary(entry)
-		msg = cloneConversationMessage(*assistant)
+		msg = assistant
 		ok = true
 	}
 	s.mu.Unlock()
@@ -612,7 +652,8 @@ func (s *ConversationStore) AppendAssistantDelta(conversationID string, delta st
 			At:             now,
 			Delta:          delta,
 			Summary:        &summary,
-			Message:        &msg,
+			Conversation:   entry,
+			Message:        msg,
 		})
 	}
 }
@@ -620,46 +661,49 @@ func (s *ConversationStore) AppendAssistantDelta(conversationID string, delta st
 func (s *ConversationStore) Complete(conversationID string, result InferenceResult) {
 	now := time.Now().UTC()
 	var (
-		cloned  ConversationEntry
 		summary ConversationSummary
 		ok      bool
+		entry   *ConversationEntry
 	)
 	s.mu.Lock()
-	entry := s.items[conversationID]
-	if entry != nil {
-		entry.Status = "completed"
-		entry.UpdatedAt = now
-		if entry.Ephemeral {
-			entry.AutoDeleteAt = timePointer(now.Add(sillyTavernQuietConversationTTL))
+	current := s.items[conversationID]
+	if current != nil {
+		next := cloneConversationEntry(current)
+		next.Status = "completed"
+		next.UpdatedAt = now
+		if next.Ephemeral {
+			next.AutoDeleteAt = timePointer(now.Add(sillyTavernQuietConversationTTL))
 		}
-		entry.ThreadID = strings.TrimSpace(result.ThreadID)
-		entry.TraceID = strings.TrimSpace(result.TraceID)
-		entry.MessageID = strings.TrimSpace(result.MessageID)
-		entry.AccountEmail = strings.TrimSpace(result.AccountEmail)
-		entry.Error = ""
-		entry.OutputAttachments = cloneUploadedAttachments(result.Attachments)
-		assistant := s.ensureAssistantMessageLocked(entry, now)
+		next.ThreadID = strings.TrimSpace(result.ThreadID)
+		next.TraceID = strings.TrimSpace(result.TraceID)
+		next.MessageID = strings.TrimSpace(result.MessageID)
+		next.AccountEmail = strings.TrimSpace(result.AccountEmail)
+		next.Error = ""
+		next.OutputAttachments = cloneUploadedAttachments(result.Attachments)
+		assistant := s.ensureAssistantMessageLocked(&next, now)
 		assistant.Status = "completed"
 		assistant.Content = sanitizeAssistantVisibleText(result.Text)
 		assistant.Attachments = summarizeUploadedAttachments(result.Attachments)
 		assistant.UpdatedAt = now
-		if len(entry.Messages) > 0 {
-			entry.Messages[len(entry.Messages)-1] = cloneConversationMessage(*assistant)
+		if len(next.Messages) > 0 {
+			next.Messages[len(next.Messages)-1] = cloneConversationMessage(*assistant)
 		}
+		refreshConversationDerivedFields(&next)
+		entry = &next
+		s.items[conversationID] = entry
 		s.moveToFrontLocked(conversationID)
-		cloned = cloneConversationEntry(entry)
 		summary = buildConversationSummary(entry)
 		ok = true
 	}
 	s.mu.Unlock()
 	if ok {
 		s.broadcast(ConversationEvent{
-			Type:           "conversation.completed",
-			ConversationID: conversationID,
-			At:             now,
-			Summary:        &summary,
-			Conversation:   &cloned,
-		})
+		Type:           "conversation.completed",
+		ConversationID: conversationID,
+		At:             now,
+		Summary:        &summary,
+		Conversation:   entry,
+	})
 	}
 }
 
@@ -670,41 +714,44 @@ func (s *ConversationStore) Fail(conversationID string, err error) {
 	now := time.Now().UTC()
 	message := strings.TrimSpace(err.Error())
 	var (
-		cloned  ConversationEntry
 		summary ConversationSummary
 		ok      bool
+		entry   *ConversationEntry
 	)
 	s.mu.Lock()
-	entry := s.items[conversationID]
-	if entry != nil {
-		entry.Status = "failed"
-		entry.Error = message
-		entry.UpdatedAt = now
-		if entry.Ephemeral {
-			entry.AutoDeleteAt = timePointer(now.Add(sillyTavernQuietConversationTTL))
+	current := s.items[conversationID]
+	if current != nil {
+		next := cloneConversationEntry(current)
+		next.Status = "failed"
+		next.Error = message
+		next.UpdatedAt = now
+		if next.Ephemeral {
+			next.AutoDeleteAt = timePointer(now.Add(sillyTavernQuietConversationTTL))
 		}
-		if len(entry.Messages) > 0 {
-			last := &entry.Messages[len(entry.Messages)-1]
+		if len(next.Messages) > 0 {
+			last := &next.Messages[len(next.Messages)-1]
 			if last.Role == "assistant" && last.Status != "completed" {
 				last.Status = "failed"
 				last.UpdatedAt = now
 			}
 		}
+		refreshConversationDerivedFields(&next)
+		entry = &next
+		s.items[conversationID] = entry
 		s.moveToFrontLocked(conversationID)
-		cloned = cloneConversationEntry(entry)
 		summary = buildConversationSummary(entry)
 		ok = true
 	}
 	s.mu.Unlock()
 	if ok {
 		s.broadcast(ConversationEvent{
-			Type:           "conversation.failed",
-			ConversationID: conversationID,
-			At:             now,
-			Error:          message,
-			Summary:        &summary,
-			Conversation:   &cloned,
-		})
+		Type:           "conversation.failed",
+		ConversationID: conversationID,
+		At:             now,
+		Error:          message,
+		Summary:        &summary,
+		Conversation:   entry,
+	})
 	}
 }
 
@@ -761,7 +808,7 @@ func (s *ConversationStore) ListExpiredEphemeral(now time.Time, limit int) []Con
 		if entry.AutoDeleteAt == nil || entry.AutoDeleteAt.After(now) {
 			continue
 		}
-		items = append(items, cloneConversationEntry(entry))
+		items = append(items, copyConversationEntryValue(entry))
 		if len(items) >= limit {
 			break
 		}
@@ -776,8 +823,7 @@ func (s *ConversationStore) Get(conversationID string) (ConversationEntry, bool)
 	if entry == nil {
 		return ConversationEntry{}, false
 	}
-	cloned := cloneConversationEntry(entry)
-	return cloned, true
+	return copyConversationEntryValue(entry), true
 }
 
 func (s *ConversationStore) FindByThreadID(threadID string) (ConversationEntry, bool) {
@@ -795,8 +841,7 @@ func (s *ConversationStore) FindByThreadID(threadID string) (ConversationEntry, 
 		if strings.TrimSpace(entry.ThreadID) != threadID {
 			continue
 		}
-		cloned := cloneConversationEntry(entry)
-		return cloned, true
+		return copyConversationEntryValue(entry), true
 	}
 	return ConversationEntry{}, false
 }
@@ -820,8 +865,7 @@ func (s *ConversationStore) FindContinuationBySegments(history []conversationPro
 		if !conversationSegmentsMatchSuffix(entrySegments, normalizedHistory) {
 			continue
 		}
-		cloned := cloneConversationEntry(entry)
-		return cloned, true
+		return copyConversationEntryValue(entry), true
 	}
 	return ConversationEntry{}, false
 }
@@ -881,16 +925,18 @@ func (s *ServerState) deleteResponsesByConversationOrThread(conversationID strin
 		return
 	}
 	s.mu.Lock()
-	for id, item := range s.ResponsesByID {
-		if (conversationID != "" && strings.TrimSpace(item.ConversationID) == conversationID) ||
-			(threadID != "" && strings.TrimSpace(item.ThreadID) == threadID) {
-			delete(s.ResponsesByID, id)
-		}
+	if s.ResponseStore != nil {
+		s.ResponseStore.deleteByConversationOrThread(conversationID, threadID)
 	}
+	sqliteWriter := s.sqliteWriter
 	store := s.Store
 	storeEnabled := store != nil && responsesPersistenceEnabled(s.Config)
 	s.mu.Unlock()
 	if storeEnabled {
+		if sqliteWriter != nil {
+			sqliteWriter.EnqueueDeleteResponsesByConversationOrThread(conversationID, threadID)
+			return
+		}
 		if err := store.DeleteResponsesByConversationOrThread(conversationID, threadID); err != nil {
 			log.Printf("[sqlite] delete responses conversation=%s thread=%s failed: %v", conversationID, threadID, err)
 		}

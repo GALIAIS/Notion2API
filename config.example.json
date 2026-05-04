@@ -43,6 +43,9 @@
     "persist_continuation_sessions": true,
     "persist_sillytavern_bindings": true
   },
+  "limits": {
+    "max_request_body_bytes": 4194304
+  },
   "features": {
     "use_web_search": true,
     "use_read_only_mode": false,
@@ -68,6 +71,16 @@
     "startup_check": true,
     "retry_on_auth_error": true,
     "auto_switch_account": true
+  },
+  "dispatch": {
+    "probe_cache_ttl_seconds": 45
+  },
+  "browser": {
+    "helper_pool_size": 0
+  },
+  "debug": {
+    "pprof_enabled": false,
+    "pprof_addr": "127.0.0.1:6060"
   },
   "accounts": [
     {

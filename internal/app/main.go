@@ -1,14 +1,20 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"expvar"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	_ "net/http/pprof"
 	"runtime/debug"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -20,26 +26,72 @@ type StoredResponse struct {
 	AccountEmail   string
 }
 
+type snapshotBundle struct {
+	Config        AppConfig
+	Session       SessionInfo
+	ModelRegistry ModelRegistry
+	DispatchOrder []NotionAccount
+}
+
 type ServerState struct {
-	mu                      sync.RWMutex
-	refreshMu               sync.Mutex
-	Config                  AppConfig
-	Session                 SessionInfo
-	Client                  *NotionAIClient
-	Store                   *SQLiteStore
-	ModelRegistry           ModelRegistry
-	ResponsesByID           map[string]StoredResponse
-	Conversations           *ConversationStore
-	AdminTokens             map[string]time.Time
-	AdminLoginAttempts      map[string]AdminLoginAttempt
-	AccountDispatchSlots    map[string]accountDispatchState
-	LastSessionRefresh      time.Time
-	LastSessionRefreshError string
+	mu                         sync.RWMutex
+	refreshMu                  sync.Mutex
+	Config                     AppConfig
+	Session                    SessionInfo
+	Client                     *NotionAIClient
+	Store                      *SQLiteStore
+	ModelRegistry              ModelRegistry
+	ResponseStore              *responseStore
+	Conversations              *ConversationStore
+	AdminTokens                map[string]time.Time
+	AdminLoginAttempts         map[string]AdminLoginAttempt
+	DispatchProbeCache         *probeCache
+	LastSessionRefresh         time.Time
+	LastSessionRefreshError    string
+	responseStoreCleanupCancel context.CancelFunc
+	sqliteWriter               *SQLiteWriter
+	snap                       atomic.Pointer[snapshotBundle]
+	slots                      atomic.Pointer[map[string]*accountSlot]
+	cachedHealthzStaticJSON    atomic.Pointer[[]byte]
+	cachedModelsListJSON       atomic.Pointer[[]byte]
+	cachedModelByIDJSON        atomic.Pointer[map[string][]byte]
 }
 
 type accountDispatchState struct {
 	MaxConcurrency int
 	InFlight       int
+}
+
+type accountSlot struct {
+	max      atomic.Int32
+	inflight atomic.Int32
+}
+
+type healthzStaticPayload struct {
+	OK                   bool   `json:"ok"`
+	DefaultModel         string `json:"default_model"`
+	ModelCount           int    `json:"model_count"`
+	UserEmail            string `json:"user_email"`
+	SpaceID              string `json:"space_id"`
+	ActiveAccount        string `json:"active_account"`
+	SessionRefreshEnable bool   `json:"session_refresh_enabled"`
+}
+
+type publicModelPayload struct {
+	ID          string `json:"id"`
+	Object      string `json:"object"`
+	Created     int    `json:"created"`
+	OwnedBy     string `json:"owned_by"`
+	Name        string `json:"name"`
+	Family      string `json:"family"`
+	Group       string `json:"group"`
+	Beta        bool   `json:"beta"`
+	NotionModel string `json:"notion_model"`
+}
+
+type publicModelsListPayload struct {
+	Object string               `json:"object"`
+	Data   []publicModelPayload `json:"data"`
 }
 
 type App struct {
@@ -56,7 +108,14 @@ const (
 	ephemeralConversationCleanupInterval  = time.Minute
 	ephemeralConversationCleanupBatchSize = 24
 	sillyTavernQuietConversationTTL       = 10 * time.Minute
+	corsAllowOrigin                       = "*"
+	corsAllowHeaders                      = "Authorization, Content-Type, X-Admin-Token"
+	corsAllowMethods                      = "GET, POST, PUT, DELETE, OPTIONS"
 )
+
+var errRequestTooLarge = errors.New("request body too large")
+var responseStorePruneTotalMetric = expvar.NewMap("notion2api_response_store_prune_total")
+var testHookResponseStoreCleanupInterval time.Duration
 
 type continuationTarget struct {
 	Conversation ConversationEntry
@@ -112,28 +171,68 @@ func normalizeAccountMaxConcurrency(raw int) int {
 	return raw
 }
 
-func (s *ServerState) initializeAccountDispatchSlotsLocked() {
-	if s.AccountDispatchSlots == nil {
-		s.AccountDispatchSlots = map[string]accountDispatchState{}
+func clampSlotInFlight(slot *accountSlot, max int32) int32 {
+	if slot == nil {
+		return 0
 	}
-	next := map[string]accountDispatchState{}
+	if max <= 0 {
+		max = 1
+	}
+	for {
+		current := slot.inflight.Load()
+		if current < 0 {
+			if slot.inflight.CompareAndSwap(current, 0) {
+				return 0
+			}
+			continue
+		}
+		if current <= max {
+			return current
+		}
+		if slot.inflight.CompareAndSwap(current, max) {
+			return max
+		}
+	}
+}
+
+func (s *ServerState) rebuildAccountSlotsLocked() {
+	if s == nil {
+		return
+	}
+	var previous map[string]*accountSlot
+	if loaded := s.slots.Load(); loaded != nil {
+		previous = *loaded
+	}
+	next := make(map[string]*accountSlot, len(s.Config.Accounts))
 	for _, account := range s.Config.Accounts {
-		emailKey := canonicalEmailKey(account.Email)
+		emailKey := getAccountEmailKey(account)
 		if emailKey == "" {
 			continue
 		}
-		maxConcurrency := normalizeAccountMaxConcurrency(account.MaxConcurrency)
-		state := s.AccountDispatchSlots[emailKey]
-		state.MaxConcurrency = maxConcurrency
-		if state.InFlight < 0 {
-			state.InFlight = 0
+		maxConcurrency := int32(normalizeAccountMaxConcurrency(account.MaxConcurrency))
+		if existing := previous[emailKey]; existing != nil {
+			existing.max.Store(maxConcurrency)
+			clampSlotInFlight(existing, maxConcurrency)
+			next[emailKey] = existing
+			continue
 		}
-		if state.InFlight > state.MaxConcurrency {
-			state.InFlight = state.MaxConcurrency
-		}
-		next[emailKey] = state
+		slot := &accountSlot{}
+		slot.max.Store(maxConcurrency)
+		next[emailKey] = slot
 	}
-	s.AccountDispatchSlots = next
+	s.slots.Store(&next)
+	syncDispatchSlotInflightFromSlots(next)
+}
+
+func (s *ServerState) loadAccountSlots() map[string]*accountSlot {
+	if s == nil {
+		return nil
+	}
+	loaded := s.slots.Load()
+	if loaded == nil {
+		return nil
+	}
+	return *loaded
 }
 
 func (s *ServerState) TryAcquireAccountDispatchSlot(email string) bool {
@@ -141,19 +240,24 @@ func (s *ServerState) TryAcquireAccountDispatchSlot(email string) bool {
 	if emailKey == "" {
 		return false
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.initializeAccountDispatchSlotsLocked()
-	state, ok := s.AccountDispatchSlots[emailKey]
-	if !ok {
+	slot := s.loadAccountSlots()[emailKey]
+	if slot == nil {
 		return false
 	}
-	if state.InFlight >= state.MaxConcurrency {
-		return false
+	for {
+		maxConcurrency := slot.max.Load()
+		if maxConcurrency <= 0 {
+			maxConcurrency = 1
+		}
+		inflight := slot.inflight.Load()
+		if inflight >= maxConcurrency {
+			return false
+		}
+		if slot.inflight.CompareAndSwap(inflight, inflight+1) {
+			setDispatchSlotInflight(emailKey, int(inflight+1))
+			return true
+		}
 	}
-	state.InFlight++
-	s.AccountDispatchSlots[emailKey] = state
-	return true
 }
 
 func (s *ServerState) ReleaseAccountDispatchSlot(email string) {
@@ -161,19 +265,21 @@ func (s *ServerState) ReleaseAccountDispatchSlot(email string) {
 	if emailKey == "" {
 		return
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.AccountDispatchSlots == nil {
+	slot := s.loadAccountSlots()[emailKey]
+	if slot == nil {
 		return
 	}
-	state, ok := s.AccountDispatchSlots[emailKey]
-	if !ok {
-		return
+	for {
+		inflight := slot.inflight.Load()
+		if inflight <= 0 {
+			setDispatchSlotInflight(emailKey, 0)
+			return
+		}
+		if slot.inflight.CompareAndSwap(inflight, inflight-1) {
+			setDispatchSlotInflight(emailKey, int(inflight-1))
+			return
+		}
 	}
-	if state.InFlight > 0 {
-		state.InFlight--
-	}
-	s.AccountDispatchSlots[emailKey] = state
 }
 
 func (s *ServerState) RemainingAccountDispatchSlots(email string) int {
@@ -181,24 +287,27 @@ func (s *ServerState) RemainingAccountDispatchSlots(email string) int {
 	if emailKey == "" {
 		return 0
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.initializeAccountDispatchSlotsLocked()
-	state, ok := s.AccountDispatchSlots[emailKey]
-	if !ok {
+	slot := s.loadAccountSlots()[emailKey]
+	if slot == nil {
 		return 0
 	}
-	remaining := state.MaxConcurrency - state.InFlight
+	maxConcurrency := slot.max.Load()
+	if maxConcurrency <= 0 {
+		maxConcurrency = 1
+	}
+	inflight := slot.inflight.Load()
+	remaining := int(maxConcurrency - inflight)
 	if remaining < 0 {
-		remaining = 0
+		return 0
 	}
 	return remaining
 }
 
 func (s *ServerState) AvailableDispatchCapacity(emails []string) int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.initializeAccountDispatchSlotsLocked()
+	slots := s.loadAccountSlots()
+	if len(slots) == 0 {
+		return 0
+	}
 	total := 0
 	seen := map[string]struct{}{}
 	for _, email := range emails {
@@ -210,11 +319,16 @@ func (s *ServerState) AvailableDispatchCapacity(emails []string) int {
 			continue
 		}
 		seen[emailKey] = struct{}{}
-		state, ok := s.AccountDispatchSlots[emailKey]
-		if !ok {
+		slot := slots[emailKey]
+		if slot == nil {
 			continue
 		}
-		remaining := state.MaxConcurrency - state.InFlight
+		maxConcurrency := slot.max.Load()
+		if maxConcurrency <= 0 {
+			maxConcurrency = 1
+		}
+		inflight := slot.inflight.Load()
+		remaining := int(maxConcurrency - inflight)
 		if remaining > 0 {
 			total += remaining
 		}
@@ -223,16 +337,30 @@ func (s *ServerState) AvailableDispatchCapacity(emails []string) int {
 }
 
 func (s *ServerState) AccountDispatchSnapshot() map[string]accountDispatchState {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.initializeAccountDispatchSlotsLocked()
-	out := make(map[string]accountDispatchState, len(s.AccountDispatchSlots))
-	for key, value := range s.AccountDispatchSlots {
-		out[key] = value
+	slots := s.loadAccountSlots()
+	out := make(map[string]accountDispatchState, len(slots))
+	for key, slot := range slots {
+		if slot == nil {
+			continue
+		}
+		maxConcurrency := int(slot.max.Load())
+		if maxConcurrency <= 0 {
+			maxConcurrency = 1
+		}
+		inflight := int(slot.inflight.Load())
+		if inflight < 0 {
+			inflight = 0
+		}
+		if inflight > maxConcurrency {
+			inflight = maxConcurrency
+		}
+		out[key] = accountDispatchState{
+			MaxConcurrency: maxConcurrency,
+			InFlight:       inflight,
+		}
 	}
 	return out
 }
-
 
 func maxFloat(a float64, b float64) float64 {
 	if a > b {
@@ -265,13 +393,13 @@ func newServerState(cfg AppConfig) (*ServerState, error) {
 		return nil, err
 	}
 	state := &ServerState{
-		ResponsesByID:      map[string]StoredResponse{},
 		Conversations:      newConversationStore(),
 		AdminTokens:        map[string]time.Time{},
 		AdminLoginAttempts: map[string]AdminLoginAttempt{},
-		AccountDispatchSlots: map[string]accountDispatchState{},
+		DispatchProbeCache: newProbeCache(),
 		Store:              store,
 	}
+	state.ResponseStore = newResponseStore(time.Duration(maxInt(cfg.Responses.StoreTTLSeconds, 1)) * time.Second)
 	persistedAccountsLoaded := false
 	if store != nil {
 		accounts, activeAccount, ok, loadErr := store.LoadAccounts()
@@ -305,7 +433,10 @@ func newServerState(cfg AppConfig) (*ServerState, error) {
 				_ = store.Close()
 				return nil, loadErr
 			}
-			state.ResponsesByID = responses
+			if state.ResponseStore == nil {
+				state.ResponseStore = newResponseStore(time.Duration(maxInt(state.Config.Responses.StoreTTLSeconds, 1)) * time.Second)
+			}
+			state.ResponseStore.replaceAll(responses)
 		}
 		if conversationSnapshotsPersistenceEnabled(state.Config) {
 			conversations, loadErr := store.LoadConversations()
@@ -321,7 +452,9 @@ func newServerState(cfg AppConfig) (*ServerState, error) {
 				return nil, saveErr
 			}
 		}
+		state.sqliteWriter = newSQLiteWriter(store, time.Duration(maxInt(state.Config.Responses.StoreTTLSeconds, 1))*time.Second)
 	}
+	state.startResponseStoreCleanupLoop(context.Background())
 	return state, nil
 }
 
@@ -352,13 +485,40 @@ func (s *ServerState) ApplyConfig(cfg AppConfig) error {
 	s.Session = session
 	s.ModelRegistry = registry
 	s.Client = client
+	if s.sqliteWriter != nil {
+		s.sqliteWriter.SetTTL(time.Duration(maxInt(cfg.Responses.StoreTTLSeconds, 1)) * time.Second)
+	}
+	s.rebuildAccountSlotsLocked()
+	s.updateSnapshotBundleLocked()
+	s.rebuildStaticJSONCachesLocked()
 	return nil
 }
 
 func (s *ServerState) Snapshot() (AppConfig, SessionInfo, ModelRegistry) {
+	if s == nil {
+		return AppConfig{}, SessionInfo{}, ModelRegistry{}
+	}
+	if snap := s.snap.Load(); snap != nil {
+		return snap.Config, snap.Session, snap.ModelRegistry
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.Config, s.Session, s.ModelRegistry
+}
+
+func (s *ServerState) updateSnapshotBundleLocked() {
+	if s == nil {
+		return
+	}
+	now := time.Now()
+	dispatchOrder := buildDispatchCandidateOrder(s.Config, now)
+	bundle := &snapshotBundle{
+		Config:        s.Config,
+		Session:       s.Session,
+		ModelRegistry: s.ModelRegistry,
+		DispatchOrder: dispatchOrder,
+	}
+	s.snap.Store(bundle)
 }
 
 func (s *ServerState) SaveAndApply(cfg AppConfig) error {
@@ -382,6 +542,17 @@ func (s *ServerState) SaveAndApply(cfg AppConfig) error {
 			return err
 		}
 	}
+	s.mu.Lock()
+	if s.ResponseStore == nil {
+		s.ResponseStore = newResponseStore(time.Duration(maxInt(cfg.Responses.StoreTTLSeconds, 1)) * time.Second)
+	} else {
+		s.ResponseStore.setTTL(time.Duration(maxInt(cfg.Responses.StoreTTLSeconds, 1)) * time.Second)
+	}
+	s.updateSnapshotBundleLocked()
+	s.mu.Unlock()
+	if canonicalEmailKey(current.ActiveAccount) != canonicalEmailKey(cfg.ActiveAccount) && s.DispatchProbeCache != nil {
+		s.DispatchProbeCache.invalidateAll()
+	}
 	return nil
 }
 
@@ -394,16 +565,6 @@ func (s *ServerState) conversationPersistenceStore() *SQLiteStore {
 	return s.Store
 }
 
-func (s *ServerState) cleanupExpiredResponsesLocked(now time.Time) {
-	ttlSeconds := maxInt(s.Config.Responses.StoreTTLSeconds, 1)
-	ttl := time.Duration(ttlSeconds) * time.Second
-	for id, item := range s.ResponsesByID {
-		if now.Sub(item.CreatedAt) > ttl {
-			delete(s.ResponsesByID, id)
-		}
-	}
-}
-
 func (s *ServerState) saveResponse(responseID string, payload map[string]any, conversationID string, threadID string) {
 	s.saveResponseWithAccount(responseID, payload, conversationID, threadID, "")
 }
@@ -411,24 +572,33 @@ func (s *ServerState) saveResponse(responseID string, payload map[string]any, co
 func (s *ServerState) saveResponseWithAccount(responseID string, payload map[string]any, conversationID string, threadID string, accountEmail string) {
 	now := time.Now().UTC()
 	s.mu.Lock()
-	s.cleanupExpiredResponsesLocked(now)
-	s.ResponsesByID[responseID] = StoredResponse{
+	store := s.ResponseStore
+	if store == nil {
+		store = newResponseStore(time.Duration(maxInt(s.Config.Responses.StoreTTLSeconds, 1)) * time.Second)
+		s.ResponseStore = store
+	}
+	store.save(responseID, StoredResponse{
 		Payload:        payload,
 		CreatedAt:      now,
 		ConversationID: strings.TrimSpace(conversationID),
 		ThreadID:       strings.TrimSpace(threadID),
 		AccountEmail:   strings.TrimSpace(accountEmail),
-	}
-	store := s.Store
+	}, now)
+	sqliteWriter := s.sqliteWriter
+	sqliteStore := s.Store
 	ttl := time.Duration(maxInt(s.Config.Responses.StoreTTLSeconds, 1)) * time.Second
-	storeEnabled := store != nil && responsesPersistenceEnabled(s.Config)
+	storeEnabled := sqliteStore != nil && responsesPersistenceEnabled(s.Config)
 	s.mu.Unlock()
 	if storeEnabled {
-		if err := store.SaveResponse(responseID, payload, now, conversationID, threadID, accountEmail); err != nil {
+		if sqliteWriter != nil {
+			sqliteWriter.EnqueueSaveResponse(responseID, payload, now, conversationID, threadID, accountEmail)
+			return
+		}
+		if err := sqliteStore.SaveResponse(responseID, payload, now, conversationID, threadID, accountEmail); err != nil {
 			log.Printf("[sqlite] save response %s failed: %v", responseID, err)
 			return
 		}
-		if err := store.DeleteExpiredResponses(ttl); err != nil {
+		if err := sqliteStore.DeleteExpiredResponses(ttl); err != nil {
 			log.Printf("[sqlite] cleanup responses failed: %v", err)
 		}
 	}
@@ -445,12 +615,10 @@ func (s *ServerState) getResponse(responseID string) (map[string]any, bool) {
 func (s *ServerState) getStoredResponse(responseID string) (StoredResponse, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.cleanupExpiredResponsesLocked(time.Now())
-	payload, ok := s.ResponsesByID[responseID]
-	if !ok {
+	if s.ResponseStore == nil {
 		return StoredResponse{}, false
 	}
-	return payload, true
+	return s.ResponseStore.get(responseID, time.Now().UTC())
 }
 
 func (s *ServerState) loadConversationContinuationStateByConversationID(conversationID string) (*conversationContinuationState, error) {
@@ -548,11 +716,193 @@ func (s *ServerState) invalidateConversationSession(sessionID string, status str
 func (s *ServerState) Close() error {
 	s.mu.RLock()
 	store := s.Store
+	cancelCleanup := s.responseStoreCleanupCancel
+	sqliteWriter := s.sqliteWriter
 	s.mu.RUnlock()
+	if cancelCleanup != nil {
+		cancelCleanup()
+	}
+	if sqliteWriter != nil {
+		sqliteWriter.Close()
+	}
 	if store == nil {
 		return nil
 	}
 	return store.Close()
+}
+
+func (s *ServerState) startResponseStoreCleanupLoop(parent context.Context) {
+	if s == nil {
+		return
+	}
+	if parent == nil {
+		parent = context.Background()
+	}
+	interval := responseStoreCleanupInterval
+	if testHookResponseStoreCleanupInterval > 0 {
+		interval = testHookResponseStoreCleanupInterval
+	}
+	ctx, cancel := context.WithCancel(parent)
+	s.mu.Lock()
+	s.responseStoreCleanupCancel = cancel
+	s.mu.Unlock()
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.runResponseStoreCleanupOnce(time.Now().UTC())
+			}
+		}
+	}()
+}
+
+func (s *ServerState) runResponseStoreCleanupOnce(now time.Time) int {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ResponseStore == nil {
+		return 0
+	}
+	removed := s.ResponseStore.pruneExpired(now)
+	if removed > 0 {
+		responseStorePruneTotalMetric.Add("expired_entries", int64(removed))
+	}
+	return removed
+}
+
+func buildPublicModelPayload(entry ModelDefinition) publicModelPayload {
+	return publicModelPayload{
+		ID:          entry.ID,
+		Object:      "model",
+		Created:     0,
+		OwnedBy:     "notion2api",
+		Name:        entry.Name,
+		Family:      entry.Family,
+		Group:       entry.Group,
+		Beta:        entry.Beta,
+		NotionModel: entry.NotionModel,
+	}
+}
+
+func buildPublicModelsListPayload(registry ModelRegistry) publicModelsListPayload {
+	items := make([]publicModelPayload, 0, len(registry.Entries))
+	for _, entry := range registry.Entries {
+		if !entry.Enabled {
+			continue
+		}
+		items = append(items, buildPublicModelPayload(entry))
+	}
+	return publicModelsListPayload{
+		Object: "list",
+		Data:   items,
+	}
+}
+
+func cloneBytes(src []byte) []byte {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make([]byte, len(src))
+	copy(dst, src)
+	return dst
+}
+
+func cloneBytesMap(src map[string][]byte) map[string][]byte {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make(map[string][]byte, len(src))
+	for key, value := range src {
+		dst[key] = cloneBytes(value)
+	}
+	return dst
+}
+
+func (s *ServerState) rebuildStaticJSONCachesLocked() {
+	healthPayload := healthzStaticPayload{
+		OK:                   true,
+		DefaultModel:         s.Config.DefaultPublicModel(),
+		ModelCount:           len(s.ModelRegistry.Entries),
+		UserEmail:            s.Session.UserEmail,
+		SpaceID:              s.Session.SpaceID,
+		ActiveAccount:        s.Config.ActiveAccount,
+		SessionRefreshEnable: s.Config.ResolveSessionRefresh().Enabled,
+	}
+	healthBody, err := json.Marshal(healthPayload)
+	if err == nil {
+		healthBodyCopy := cloneBytes(healthBody)
+		s.cachedHealthzStaticJSON.Store(&healthBodyCopy)
+	} else {
+		s.cachedHealthzStaticJSON.Store(nil)
+	}
+
+	modelsPayload := buildPublicModelsListPayload(s.ModelRegistry)
+	modelsBody, err := json.Marshal(modelsPayload)
+	if err == nil {
+		modelsBodyCopy := cloneBytes(modelsBody)
+		s.cachedModelsListJSON.Store(&modelsBodyCopy)
+	} else {
+		s.cachedModelsListJSON.Store(nil)
+	}
+
+	modelByID := make(map[string][]byte, len(s.ModelRegistry.Entries))
+	for _, entry := range s.ModelRegistry.Entries {
+		if !entry.Enabled {
+			continue
+		}
+		body, marshalErr := json.Marshal(buildPublicModelPayload(entry))
+		if marshalErr != nil {
+			continue
+		}
+		modelByID[normalizeLookupKey(entry.ID)] = cloneBytes(body)
+	}
+	modelByIDCopy := cloneBytesMap(modelByID)
+	s.cachedModelByIDJSON.Store(&modelByIDCopy)
+}
+
+func writeJSONBytes(w http.ResponseWriter, status int, body []byte) {
+	applyCORSHeaders(w)
+	w.Header().Set("X-Notion2API", "1")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	_, _ = w.Write(body)
+}
+
+func appendHealthzRuntimeFields(body []byte, sessionReady bool, lastRefresh time.Time, lastRefreshError string) []byte {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 || trimmed[len(trimmed)-1] != '}' {
+		trimmed = []byte(`{"ok":true}`)
+	}
+	trimmed = bytes.TrimSuffix(trimmed, []byte("}"))
+	tail := map[string]any{
+		"session_ready":              sessionReady,
+		"last_session_refresh":       formatTimeOrEmpty(lastRefresh),
+		"last_session_refresh_error": lastRefreshError,
+	}
+	tailBody, err := json.Marshal(tail)
+	if err != nil {
+		return body
+	}
+	tailBody = bytes.TrimPrefix(tailBody, []byte("{"))
+	out := make([]byte, 0, len(trimmed)+1+len(tailBody))
+	out = append(out, trimmed...)
+	if len(trimmed) > 1 {
+		out = append(out, ',')
+	}
+	out = append(out, tailBody...)
+	return out
+}
+
+func applyCORSHeaders(w http.ResponseWriter) {
+	w.Header().Set("Access-Control-Allow-Origin", corsAllowOrigin)
+	w.Header().Set("Access-Control-Allow-Headers", corsAllowHeaders)
+	w.Header().Set("Access-Control-Allow-Methods", corsAllowMethods)
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {
@@ -561,11 +911,9 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	applyCORSHeaders(w)
 	w.Header().Set("X-Notion2API", "1")
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Admin-Token")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 	w.WriteHeader(status)
 	_, _ = w.Write(body)
 }
@@ -581,13 +929,28 @@ func writeOpenAIError(w http.ResponseWriter, status int, message string, errorTy
 	})
 }
 
+func writeInvalidBodyError(w http.ResponseWriter, err error) {
+	if errors.Is(err, errRequestTooLarge) {
+		writeOpenAIError(w, http.StatusRequestEntityTooLarge, "request body exceeds configured limit", "invalid_request_error", "request_too_large")
+		return
+	}
+	writeOpenAIError(w, http.StatusBadRequest, err.Error(), "invalid_request_error", nilString())
+}
+
 func nilString() string {
 	return ""
 }
 
-func decodeBody(r *http.Request) (map[string]any, error) {
-	defer r.Body.Close()
-	decoder := json.NewDecoder(r.Body)
+func decodeBodyWithLimit(w http.ResponseWriter, r *http.Request, maxBytes int64) (map[string]any, error) {
+	raw, err := decodeBodyRawWithLimit(w, r, maxBytes)
+	if err != nil {
+		return nil, err
+	}
+	return decodeBodyMapFromRaw(raw)
+}
+
+func decodeBodyMapFromRaw(raw []byte) (map[string]any, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
 	var payload map[string]any
 	if err := decoder.Decode(&payload); err != nil {
@@ -597,6 +960,65 @@ func decodeBody(r *http.Request) (map[string]any, error) {
 		payload = map[string]any{}
 	}
 	return payload, nil
+}
+
+func decodeBodyRawWithLimit(w http.ResponseWriter, r *http.Request, maxBytes int64) ([]byte, error) {
+	if maxBytes > 0 && w != nil {
+		r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+	}
+	defer r.Body.Close()
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			return nil, errRequestTooLarge
+		}
+		return nil, fmt.Errorf("invalid json: %w", err)
+	}
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		return []byte("{}"), nil
+	}
+	var raw json.RawMessage
+	if err := json.Unmarshal(trimmed, &raw); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			return nil, errRequestTooLarge
+		}
+		return nil, fmt.Errorf("invalid json: %w", err)
+	}
+	normalized := bytes.TrimSpace(raw)
+	if len(normalized) == 0 {
+		return []byte("{}"), nil
+	}
+	return normalized, nil
+}
+
+func (a *App) decodeBody(w http.ResponseWriter, r *http.Request) (map[string]any, error) {
+	raw, err := a.decodeBodyRaw(w, r)
+	if err != nil {
+		return nil, err
+	}
+	return decodeBodyMapFromRaw(raw)
+}
+
+func (a *App) decodeBodyRaw(w http.ResponseWriter, r *http.Request) ([]byte, error) {
+	maxBytes := int64(0)
+	if a != nil && a.State != nil {
+		cfg, _, _ := a.State.Snapshot()
+		maxBytes = cfg.Limits.MaxRequestBodyBytes
+	}
+	return decodeBodyRawWithLimit(w, r, maxBytes)
+}
+
+func decodeTypedBodyFromRaw[T any](raw []byte) (T, error) {
+	var typed T
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&typed); err != nil {
+		return typed, fmt.Errorf("invalid json: %w", err)
+	}
+	return typed, nil
 }
 
 func (a *App) authOK(w http.ResponseWriter, r *http.Request) bool {
@@ -614,12 +1036,18 @@ func (a *App) authOK(w http.ResponseWriter, r *http.Request) bool {
 }
 
 func (a *App) serveHealthz(w http.ResponseWriter) {
-	cfg, session, registry := a.State.Snapshot()
 	a.State.mu.RLock()
 	sessionReady := a.State.Client != nil
 	lastRefresh := a.State.LastSessionRefresh
 	lastRefreshError := a.State.LastSessionRefreshError
+	cached := a.State.cachedHealthzStaticJSON.Load()
 	a.State.mu.RUnlock()
+	if cached != nil {
+		body := appendHealthzRuntimeFields(*cached, sessionReady, lastRefresh, lastRefreshError)
+		writeJSONBytes(w, http.StatusOK, body)
+		return
+	}
+	cfg, session, registry := a.State.Snapshot()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":                         true,
 		"default_model":              cfg.DefaultPublicModel(),
@@ -635,28 +1063,13 @@ func (a *App) serveHealthz(w http.ResponseWriter) {
 }
 
 func (a *App) serveModels(w http.ResponseWriter) {
-	_, _, registry := a.State.Snapshot()
-	items := make([]map[string]any, 0, len(registry.Entries))
-	for _, entry := range registry.Entries {
-		if !entry.Enabled {
-			continue
-		}
-		items = append(items, map[string]any{
-			"id":           entry.ID,
-			"object":       "model",
-			"created":      0,
-			"owned_by":     "notion2api",
-			"name":         entry.Name,
-			"family":       entry.Family,
-			"group":        entry.Group,
-			"beta":         entry.Beta,
-			"notion_model": entry.NotionModel,
-		})
+	cached := a.State.cachedModelsListJSON.Load()
+	if cached != nil {
+		writeJSONBytes(w, http.StatusOK, *cached)
+		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"object": "list",
-		"data":   items,
-	})
+	_, _, registry := a.State.Snapshot()
+	writeJSON(w, http.StatusOK, buildPublicModelsListPayload(registry))
 }
 
 func (a *App) serveModelByID(w http.ResponseWriter, path string) {
@@ -667,17 +1080,13 @@ func (a *App) serveModelByID(w http.ResponseWriter, path string) {
 		writeOpenAIError(w, http.StatusNotFound, "model not found", "invalid_request_error", "model_not_found")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"id":           entry.ID,
-		"object":       "model",
-		"created":      0,
-		"owned_by":     "notion2api",
-		"name":         entry.Name,
-		"family":       entry.Family,
-		"group":        entry.Group,
-		"beta":         entry.Beta,
-		"notion_model": entry.NotionModel,
-	})
+	if cached := a.State.cachedModelByIDJSON.Load(); cached != nil {
+		if body, ok := (*cached)[normalizeLookupKey(entry.ID)]; ok && len(body) > 0 {
+			writeJSONBytes(w, http.StatusOK, body)
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, buildPublicModelPayload(entry))
 }
 
 func (a *App) serveResponseByID(w http.ResponseWriter, path string) {
@@ -913,8 +1322,13 @@ func attachConversationResponseMetadata(payload map[string]any, conversationID s
 }
 
 func (a *App) resolveContinuationConversation(r *http.Request, payload map[string]any, previousResponseID string, hiddenPrompt string, segments []conversationPromptSegment) (continuationTarget, bool) {
-	rawCount := sessionRawMessageCount(segments)
 	explicitConversationID := requestedConversationID(r, payload)
+	explicitThreadID := requestedThreadID(r, payload)
+	return a.resolveContinuationConversationWithExplicit(previousResponseID, hiddenPrompt, segments, explicitConversationID, explicitThreadID)
+}
+
+func (a *App) resolveContinuationConversationWithExplicit(previousResponseID string, hiddenPrompt string, segments []conversationPromptSegment, explicitConversationID string, explicitThreadID string) (continuationTarget, bool) {
+	rawCount := sessionRawMessageCount(segments)
 	validateState := func(state *conversationContinuationState) bool {
 		if state == nil {
 			return true
@@ -986,9 +1400,9 @@ func (a *App) resolveContinuationConversation(r *http.Request, payload map[strin
 			}
 		}
 	}
-	if threadID := requestedThreadID(r, payload); threadID != "" {
-		if entry, ok := a.State.conversations().FindByThreadID(threadID); ok {
-			state, err := a.State.loadConversationContinuationStateByThreadID(threadID)
+	if explicitThreadID != "" {
+		if entry, ok := a.State.conversations().FindByThreadID(explicitThreadID); ok {
+			state, err := a.State.loadConversationContinuationStateByThreadID(explicitThreadID)
 			if err == nil && !validateState(state) {
 				return continuationTarget{}, false
 			}
@@ -998,9 +1412,9 @@ func (a *App) resolveContinuationConversation(r *http.Request, payload map[strin
 			return continuationTarget{Conversation: entry}, true
 		}
 		target := continuationTarget{Conversation: ConversationEntry{
-			ThreadID: threadID,
+			ThreadID: explicitThreadID,
 		}}
-		if state, err := a.State.loadConversationContinuationStateByThreadID(threadID); err == nil {
+		if state, err := a.State.loadConversationContinuationStateByThreadID(explicitThreadID); err == nil {
 			if !validateState(state) {
 				return continuationTarget{}, false
 			}
@@ -1111,6 +1525,70 @@ func includeUsageInStream(payload map[string]any) bool {
 	return includeUsage
 }
 
+func decodeChatCompletionsRequestBodyFromRaw(raw []byte) (chatCompletionsRequestBody, map[string]any, error) {
+	typed, err := decodeTypedBodyFromRaw[chatCompletionsRequestBody](raw)
+	if err == nil {
+		return normalizeTypedChatCompletionsRequestBody(typed), nil, nil
+	}
+	payload, mapErr := decodeBodyMapFromRaw(raw)
+	if mapErr != nil {
+		return chatCompletionsRequestBody{}, nil, mapErr
+	}
+	return extractChatCompletionsRequestBody(payload), payload, nil
+}
+
+func decodeResponsesRequestBodyFromRaw(raw []byte) (responsesRequestBody, map[string]any, error) {
+	typed, err := decodeTypedBodyFromRaw[responsesRequestBody](raw)
+	if err == nil {
+		return normalizeTypedResponsesRequestBody(typed), nil, nil
+	}
+	payload, mapErr := decodeBodyMapFromRaw(raw)
+	if mapErr != nil {
+		return responsesRequestBody{}, nil, mapErr
+	}
+	return extractResponsesRequestBody(payload), payload, nil
+}
+
+func maybeSillyTavernByTypedMessages(rawMessages any) bool {
+	items := sliceValue(rawMessages)
+	if len(items) == 0 {
+		return false
+	}
+	systemPrompts := make([]string, 0, len(items))
+	for _, raw := range items {
+		msg := mapValue(raw)
+		if msg == nil {
+			continue
+		}
+		if strings.TrimSpace(strings.ToLower(stringValue(msg["role"]))) != "system" {
+			continue
+		}
+		text := collapseWhitespace(flattenContent(msg["content"]))
+		if text != "" {
+			systemPrompts = append(systemPrompts, text)
+		}
+	}
+	if len(systemPrompts) == 0 {
+		return false
+	}
+	if looksLikeSillyTavernImpersonate(systemPrompts) || looksLikeSillyTavernQuiet(systemPrompts, nil) {
+		return true
+	}
+	for _, prompt := range systemPrompts {
+		lower := strings.ToLower(collapseWhitespace(prompt))
+		if strings.Contains(lower, "fictional chat between") ||
+			strings.Contains(lower, "[start a new chat]") ||
+			strings.Contains(lower, "[continue your last message without repeating its original content.]") {
+			return true
+		}
+	}
+	return false
+}
+
+func rawMayNeedSillyTavernPayloadFallback(raw []byte) bool {
+	return bytes.Contains(raw, []byte(`"continue_prefill"`)) || bytes.Contains(raw, []byte(`"show_thoughts"`))
+}
+
 func chatCompletionInitialFlushDelayForRequest(request PromptRunRequest) time.Duration {
 	if request.ClientProfile == sillyTavernClientProfile || request.StreamReasoningWarmup {
 		return 0
@@ -1152,16 +1630,33 @@ func (a *App) runPromptStreamWithSink(r *http.Request, request PromptRunRequest,
 }
 
 func (a *App) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
-	payload, err := decodeBody(r)
+	raw, err := a.decodeBodyRaw(w, r)
 	if err != nil {
-		writeOpenAIError(w, http.StatusBadRequest, err.Error(), "invalid_request_error", nilString())
+		writeInvalidBodyError(w, err)
 		return
 	}
-	if isLikelySillyTavernPayload(payload) {
+	typed, payload, err := decodeChatCompletionsRequestBodyFromRaw(raw)
+	if err != nil {
+		writeInvalidBodyError(w, err)
+		return
+	}
+	if payload == nil && (typed.likelySillyTavernByEnvelope() || maybeSillyTavernByTypedMessages(typed.Messages) || rawMayNeedSillyTavernPayloadFallback(raw)) {
+		payload, err = decodeBodyMapFromRaw(raw)
+		if err != nil {
+			writeInvalidBodyError(w, err)
+			return
+		}
+	}
+	if payload != nil && (typed.likelySillyTavernByEnvelope() || isLikelySillyTavernPayload(payload)) {
 		a.handleSillyTavernChatCompletionsPayload(w, r, payload)
 		return
 	}
-	normalized, err := normalizeChatInput(payload)
+	messages := sliceValue(typed.Messages)
+	if len(messages) == 0 {
+		writeOpenAIError(w, http.StatusBadRequest, "messages must be an array", "invalid_request_error", nilString())
+		return
+	}
+	normalized, err := normalizeChatInputFromParts(messages, typed.Attachments)
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, err.Error(), "invalid_request_error", nilString())
 		return
@@ -1171,7 +1666,12 @@ func (a *App) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg, _, registry := a.State.Snapshot()
-	entry, err := registry.Resolve(requestedModel(payload, cfg.DefaultPublicModel()), cfg.DefaultPublicModel())
+	requestedModelID := requestedModelFromTyped(typed.Model, cfg.DefaultPublicModel())
+	useWebSearch := requestedWebSearchFromTyped(typed.UseWebSearch, typed.Metadata, typed.Tools, cfg.Features.UseWebSearch)
+	preferredConversationID := requestedConversationIDFromTyped(r, typed.ConversationID, typed.Conversation, typed.Metadata)
+	explicitThreadID := requestedThreadIDFromTyped(r, typed.ThreadID, typed.Thread, typed.NotionThreadID, typed.Metadata)
+	requestedAccount := requestedAccountEmailFromTyped(r, typed.AccountEmail, typed.NotionAccountEmail, typed.Metadata)
+	entry, err := registry.Resolve(requestedModelID, cfg.DefaultPublicModel())
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, err.Error(), "invalid_request_error", "model_not_found")
 		return
@@ -1187,17 +1687,16 @@ func (a *App) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		HiddenPrompt:       hiddenPrompt,
 		PublicModel:        entry.ID,
 		NotionModel:        entry.NotionModel,
-		UseWebSearch:       requestedWebSearch(payload, cfg.Features.UseWebSearch),
+		UseWebSearch:       useWebSearch,
 		Attachments:        normalized.Attachments,
 		SessionFingerprint: originalFingerprint,
 		RawMessageCount:    originalRawMessageCount,
 	}
 	freshThreadMode := forceFreshThreadPerRequest(cfg)
-	preferredConversationID := requestedConversationID(r, payload)
 	conversation := ConversationEntry{}
-	if matched, ok := a.resolveContinuationConversation(r, payload, "", hiddenPrompt, normalized.Segments); ok {
+	if matched, ok := a.resolveContinuationConversationWithExplicit("", hiddenPrompt, normalized.Segments, preferredConversationID, explicitThreadID); ok {
 		conversation = matched.Conversation
-		request.PinnedAccountEmail = firstNonEmpty(strings.TrimSpace(conversation.AccountEmail), requestedAccountEmail(r, payload))
+		request.PinnedAccountEmail = firstNonEmpty(strings.TrimSpace(conversation.AccountEmail), requestedAccount)
 		if freshThreadMode {
 			request.ForceLocalConversationContinue = strings.TrimSpace(conversation.ID) != ""
 			request.Prompt = buildFreshThreadReplayPromptFromConversation(conversation, latestPrompt, normalized.Attachments, promptText)
@@ -1210,14 +1709,18 @@ func (a *App) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			request.Prompt = latestPrompt
 		}
 	} else {
-		request.PinnedAccountEmail = requestedAccountEmail(r, payload)
+		request.PinnedAccountEmail = requestedAccount
 	}
 	request.ConversationID = firstNonEmpty(strings.TrimSpace(conversation.ID), preferredConversationID)
 	conversationID := a.startConversationTurn(conversation.ID, preferredConversationID, "api", "chat_completions", resolveRequestPromptForContinuation(normalized), request)
 	setConversationIDHeader(w, conversationID)
-	stream, _ := payload["stream"].(bool)
+	stream := typed.Stream
 	if stream {
-		a.writeChatCompletionLiveStream(w, r, request, entry.ID, includeUsageInStream(payload), conversationID)
+		includeUsage := false
+		if typed.StreamIncludeUsage != nil {
+			includeUsage = *typed.StreamIncludeUsage
+		}
+		a.writeChatCompletionLiveStream(w, r, request, entry.ID, includeUsage, conversationID)
 		return
 	}
 	result, err := a.runPrompt(r, request)
@@ -1237,9 +1740,9 @@ func (a *App) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleSillyTavernChatCompletions(w http.ResponseWriter, r *http.Request) {
-	payload, err := decodeBody(r)
+	payload, err := a.decodeBody(w, r)
 	if err != nil {
-		writeOpenAIError(w, http.StatusBadRequest, err.Error(), "invalid_request_error", nilString())
+		writeInvalidBodyError(w, err)
 		return
 	}
 	a.handleSillyTavernChatCompletionsPayload(w, r, payload)
@@ -1349,14 +1852,19 @@ func (a *App) handleSillyTavernChatCompletionsPayload(w http.ResponseWriter, r *
 }
 
 func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
-	payload, err := decodeBody(r)
+	raw, err := a.decodeBodyRaw(w, r)
 	if err != nil {
-		writeOpenAIError(w, http.StatusBadRequest, err.Error(), "invalid_request_error", nilString())
+		writeInvalidBodyError(w, err)
 		return
 	}
-	stream, _ := payload["stream"].(bool)
+	typed, _, err := decodeResponsesRequestBodyFromRaw(raw)
+	if err != nil {
+		writeInvalidBodyError(w, err)
+		return
+	}
+	stream := typed.Stream
 	var previousResponse map[string]any
-	previousResponseID := strings.TrimSpace(stringValue(payload["previous_response_id"]))
+	previousResponseID := strings.TrimSpace(typed.PreviousResponseID)
 	if previousResponseID != "" {
 		var ok bool
 		previousResponse, ok = a.State.getResponse(previousResponseID)
@@ -1365,7 +1873,7 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	normalized, err := normalizeResponsesInput(payload, previousResponse)
+	normalized, err := normalizeResponsesInputFromParts(typed.Input, typed.Attachments, previousResponse)
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, err.Error(), "invalid_request_error", nilString())
 		return
@@ -1375,7 +1883,12 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg, _, registry := a.State.Snapshot()
-	entry, err := registry.Resolve(requestedModel(payload, cfg.DefaultPublicModel()), cfg.DefaultPublicModel())
+	requestedModelID := requestedModelFromTyped(typed.Model, cfg.DefaultPublicModel())
+	useWebSearch := requestedWebSearchFromTyped(typed.UseWebSearch, typed.Metadata, typed.Tools, cfg.Features.UseWebSearch)
+	preferredConversationID := requestedConversationIDFromTyped(r, typed.ConversationID, typed.Conversation, typed.Metadata)
+	explicitThreadID := requestedThreadIDFromTyped(r, typed.ThreadID, typed.Thread, typed.NotionThreadID, typed.Metadata)
+	requestedAccount := requestedAccountEmailFromTyped(r, typed.AccountEmail, typed.NotionAccountEmail, typed.Metadata)
+	entry, err := registry.Resolve(requestedModelID, cfg.DefaultPublicModel())
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, err.Error(), "invalid_request_error", "model_not_found")
 		return
@@ -1391,17 +1904,16 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 		HiddenPrompt:       hiddenPrompt,
 		PublicModel:        entry.ID,
 		NotionModel:        entry.NotionModel,
-		UseWebSearch:       requestedWebSearch(payload, cfg.Features.UseWebSearch),
+		UseWebSearch:       useWebSearch,
 		Attachments:        normalized.Attachments,
 		SessionFingerprint: originalFingerprint,
 		RawMessageCount:    originalRawMessageCount,
 	}
 	freshThreadMode := forceFreshThreadPerRequest(cfg)
-	preferredConversationID := requestedConversationID(r, payload)
 	conversation := ConversationEntry{}
-	if matched, ok := a.resolveContinuationConversation(r, payload, previousResponseID, hiddenPrompt, normalized.Segments); ok {
+	if matched, ok := a.resolveContinuationConversationWithExplicit(previousResponseID, hiddenPrompt, normalized.Segments, preferredConversationID, explicitThreadID); ok {
 		conversation = matched.Conversation
-		request.PinnedAccountEmail = firstNonEmpty(strings.TrimSpace(conversation.AccountEmail), requestedAccountEmail(r, payload))
+		request.PinnedAccountEmail = firstNonEmpty(strings.TrimSpace(conversation.AccountEmail), requestedAccount)
 		if freshThreadMode {
 			request.ForceLocalConversationContinue = strings.TrimSpace(conversation.ID) != ""
 			request.Prompt = buildFreshThreadReplayPromptFromConversation(conversation, latestPrompt, normalized.Attachments, promptText)
@@ -1414,7 +1926,7 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 			request.Prompt = latestPrompt
 		}
 	} else {
-		request.PinnedAccountEmail = requestedAccountEmail(r, payload)
+		request.PinnedAccountEmail = requestedAccount
 	}
 	if freshThreadMode && strings.TrimSpace(conversation.ID) == "" {
 		request.Prompt = buildFreshThreadReplayPromptFromStoredResponse(normalized.PreviousResponsePrompt, latestPrompt, normalized.Attachments, request.Prompt)
@@ -1468,11 +1980,11 @@ func (a *App) writeUpstreamError(w http.ResponseWriter, err error) {
 }
 
 func prepareOpenAISSEHeaders(w http.ResponseWriter) {
+	applyCORSHeaders(w)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache, no-transform")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -2106,7 +2618,13 @@ func (a *App) writeResponsesStream(w http.ResponseWriter, r *http.Request, resul
 }
 
 func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	startedAt := time.Now()
+	statusCode := http.StatusOK
+	defer func() {
+		observeRequestDuration(r.URL.Path, r.Method, statusCode, time.Since(startedAt))
+	}()
 	safeWriter := &panicSafeResponseWriter{ResponseWriter: w}
+	applyCORSHeaders(safeWriter)
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			stack := strings.TrimSpace(string(debug.Stack()))
@@ -2139,10 +2657,8 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	if r.Method == http.MethodOptions {
-		safeWriter.Header().Set("Access-Control-Allow-Origin", "*")
-		safeWriter.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Admin-Token")
-		safeWriter.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		safeWriter.WriteHeader(http.StatusNoContent)
+		statusCode = safeWriter.status
 		return
 	}
 
@@ -2150,16 +2666,20 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodGet && path == "/":
 		a.serveIndex(safeWriter)
+		statusCode = safeWriter.status
 		return
 	case strings.HasPrefix(path, "/admin"):
 		a.handleAdmin(safeWriter, r)
+		statusCode = safeWriter.status
 		return
 	case r.Method == http.MethodGet && path == "/healthz":
 		a.serveHealthz(safeWriter)
+		statusCode = safeWriter.status
 		return
 	}
 
 	if !a.authOK(safeWriter, r) {
+		statusCode = safeWriter.status
 		return
 	}
 
@@ -2168,6 +2688,10 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		a.serveModels(safeWriter)
 	case r.Method == http.MethodGet && strings.HasPrefix(path, "/v1/models/"):
 		a.serveModelByID(safeWriter, path)
+	case r.Method == http.MethodGet && path == "/debug/vars":
+		expvar.Handler().ServeHTTP(safeWriter, r)
+	case r.Method == http.MethodGet && path == "/metrics":
+		writePrometheusMetrics(safeWriter)
 	case r.Method == http.MethodGet && strings.HasPrefix(path, "/v1/responses/"):
 		a.serveResponseByID(safeWriter, path)
 	case r.Method == http.MethodPost && path == "/v1/st/chat/completions":
@@ -2179,6 +2703,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeOpenAIError(safeWriter, http.StatusNotFound, "route not found", "invalid_request_error", "not_found")
 	}
+	statusCode = safeWriter.status
 }
 
 func Main() {
@@ -2190,6 +2715,14 @@ func Main() {
 	app := &App{State: state}
 	state.StartSessionRefreshLoop(context.Background())
 	app.StartEphemeralConversationCleanupLoop(context.Background())
+	if cfg.Debug.PprofEnabled {
+		go func(addr string) {
+			log.Printf("[pprof] listening on http://%s/debug/pprof/ (local debug endpoint; avoid public exposure)", addr)
+			if err := http.ListenAndServe(addr, nil); err != nil {
+				log.Printf("[pprof] server stopped: %v", err)
+			}
+		}(cfg.Debug.PprofAddr)
+	}
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 	server := &http.Server{
 		Addr:              addr,

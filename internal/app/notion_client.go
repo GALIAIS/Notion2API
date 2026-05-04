@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"expvar"
 	"fmt"
 	"io"
 	"log"
@@ -19,6 +20,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -36,6 +38,31 @@ const (
 
 var leadingLangTagPattern = regexp.MustCompile(`(?is)^\s*(?:<lang\b[^>]*>|</lang>)\s*`)
 var prefixedTranscriptStepIDPattern = regexp.MustCompile(`^(?:cfg|ctx|upd)_([0-9a-fA-F]{32})$`)
+var notionHTTPTransportCacheMetric = expvar.NewMap("notion2api_http_transport_cache_total")
+
+type notionHTTPTransportCacheKey struct {
+	UpstreamBaseURL       string
+	UpstreamOriginURL     string
+	UpstreamHostHeader    string
+	UpstreamTLSServerName string
+	UpstreamUseEnvProxy   bool
+	ProxyMode             string
+	ProxyURL              string
+	ProxyHTTPURL          string
+	ProxyHTTPSURL         string
+	ResinEnabled          bool
+	ResinURL              string
+	ResinPlatform         string
+	ResinMode             string
+	AccountEmailKey       string
+}
+
+var notionTransportCache = struct {
+	mu    sync.RWMutex
+	items map[notionHTTPTransportCacheKey]*http.Transport
+}{
+	items: map[notionHTTPTransportCacheKey]*http.Transport{},
+}
 
 func bestEffortTimeout(parent context.Context, cap time.Duration) time.Duration {
 	if cap <= 0 {
@@ -385,12 +412,13 @@ type ndjsonPatchOperation struct {
 	V any    `json:"v"`
 }
 
-type ndjsonEnvelope struct {
-	Type      string                 `json:"type"`
-	Data      map[string]any         `json:"data,omitempty"`
-	Version   int                    `json:"version,omitempty"`
-	V         []ndjsonPatchOperation `json:"v,omitempty"`
-	RecordMap map[string]any         `json:"recordMap,omitempty"`
+type ndjsonStreamLine struct {
+	Type       string                      `json:"type"`
+	V          []ndjsonPatchOperation      `json:"v,omitempty"`
+	RecordMap  map[string]any              `json:"recordMap,omitempty"`
+	ID         string                      `json:"id,omitempty"`
+	FinishedAt any                         `json:"finishedAt,omitempty"`
+	Value      []ndjsonAgentInferenceValue `json:"value,omitempty"`
 }
 
 type ndjsonAgentInferenceValue struct {
@@ -623,10 +651,37 @@ func newNotionAIStreamingClient(session SessionInfo, cfg AppConfig, accountEmail
 	return newNotionAIClientWithMode(session, cfg, accountEmail, true)
 }
 
-func newNotionAIClientWithMode(session SessionInfo, cfg AppConfig, accountEmail string, streaming bool) *NotionAIClient {
+func buildNotionHTTPTransportCacheKey(cfg AppConfig, accountEmail string) notionHTTPTransportCacheKey {
 	normalizedCfg := normalizeConfig(cfg)
-	resolver := NewProxyResolver(normalizedCfg)
 	upstream := normalizedCfg.NotionUpstream()
+	policy := normalizedCfg.ResolveProxyPolicyForAccount(accountEmail)
+	return notionHTTPTransportCacheKey{
+		UpstreamBaseURL:       strings.TrimSpace(upstream.BaseURL),
+		UpstreamOriginURL:     strings.TrimSpace(upstream.OriginURL),
+		UpstreamHostHeader:    strings.TrimSpace(upstream.HostHeader),
+		UpstreamTLSServerName: strings.TrimSpace(upstream.TLSServerName),
+		UpstreamUseEnvProxy:   upstream.UseEnvProxy,
+		ProxyMode:             strings.TrimSpace(policy.Mode),
+		ProxyURL:              strings.TrimSpace(policy.URL),
+		ProxyHTTPURL:          strings.TrimSpace(policy.HTTPURL),
+		ProxyHTTPSURL:         strings.TrimSpace(policy.HTTPSURL),
+		ResinEnabled:          policy.Resin.Enabled,
+		ResinURL:              strings.TrimSpace(policy.Resin.URL),
+		ResinPlatform:         strings.TrimSpace(policy.Resin.Platform),
+		ResinMode:             strings.TrimSpace(policy.Resin.Mode),
+		AccountEmailKey:       canonicalEmailKey(accountEmail),
+	}
+}
+
+func cachedNotionHTTPTransport(cfg AppConfig, accountEmail string, resolver *ProxyResolver, upstream NotionUpstream) *http.Transport {
+	key := buildNotionHTTPTransportCacheKey(cfg, accountEmail)
+	notionTransportCache.mu.RLock()
+	cached := notionTransportCache.items[key]
+	notionTransportCache.mu.RUnlock()
+	if cached != nil {
+		notionHTTPTransportCacheMetric.Add("hit_rlock", 1)
+		return cached
+	}
 	tlsConfig := &tls.Config{InsecureSkipVerify: true}
 	if strings.TrimSpace(upstream.TLSServerName) != "" {
 		tlsConfig.ServerName = strings.TrimSpace(upstream.TLSServerName)
@@ -650,6 +705,23 @@ func newNotionAIClientWithMode(session SessionInfo, cfg AppConfig, accountEmail 
 			return proxyFunc(req)
 		},
 	}
+	notionTransportCache.mu.Lock()
+	if existing := notionTransportCache.items[key]; existing != nil {
+		notionTransportCache.mu.Unlock()
+		notionHTTPTransportCacheMetric.Add("hit_lock", 1)
+		return existing
+	}
+	notionTransportCache.items[key] = transport
+	notionTransportCache.mu.Unlock()
+	notionHTTPTransportCacheMetric.Add("miss_new", 1)
+	return transport
+}
+
+func newNotionAIClientWithMode(session SessionInfo, cfg AppConfig, accountEmail string, streaming bool) *NotionAIClient {
+	normalizedCfg := normalizeConfig(cfg)
+	resolver := NewProxyResolver(normalizedCfg)
+	upstream := normalizedCfg.NotionUpstream()
+	transport := cachedNotionHTTPTransport(normalizedCfg, accountEmail, resolver, upstream)
 	timeout := requestTimeout(normalizedCfg)
 	clientTimeout := timeout
 	if streaming {
@@ -1083,7 +1155,9 @@ func (c *NotionAIClient) runInferenceTranscriptWithFallback(ctx context.Context,
 	if c.Config.DebugUpstream {
 		log.Printf("[debug_upstream] runInferenceTranscript http start thread_id=%s", threadID)
 	}
+	callStartedAt := time.Now()
 	parsed, err := c.runInferenceTranscriptHTTP(ctx, payload, threadID, sink)
+	observeTransportCallDuration(time.Since(callStartedAt))
 	if c.Config.DebugUpstream {
 		log.Printf("[debug_upstream] runInferenceTranscript http done thread_id=%s line_count=%d message_ids=%d err=%v", threadID, parsed.LineCount, len(parsed.MessageIDs), err)
 	}
@@ -2336,26 +2410,28 @@ func (s *ndjsonTranscriptState) handleLine(line []byte, threadID string, sink In
 	if len(line) == 0 {
 		return nil
 	}
-	var envelope ndjsonEnvelope
-	if err := json.Unmarshal(line, &envelope); err != nil {
+	var streamLine ndjsonStreamLine
+	if err := json.Unmarshal(line, &streamLine); err != nil {
 		return err
 	}
 	s.LineCount++
-	switch envelope.Type {
+	switch streamLine.Type {
 	case "patch":
-		for _, op := range envelope.V {
+		for _, op := range streamLine.V {
 			if err := s.applyPatchOperation(op, sink); err != nil {
 				return err
 			}
 		}
 	case "agent-inference":
-		var event ndjsonAgentInferenceEvent
-		if err := json.Unmarshal(line, &event); err != nil {
-			return err
+		event := ndjsonAgentInferenceEvent{
+			Type:       streamLine.Type,
+			ID:         streamLine.ID,
+			FinishedAt: streamLine.FinishedAt,
+			Value:      streamLine.Value,
 		}
 		return s.mergeAgentInferenceEvent(event, sink)
 	case "record-map":
-		messageIDs, agent, outcomeErr, ok := finalThreadOutcomeFromRecordMap(envelope.RecordMap, threadID)
+		messageIDs, agent, outcomeErr, ok := finalThreadOutcomeFromRecordMap(streamLine.RecordMap, threadID)
 		if len(messageIDs) > 0 {
 			s.MessageIDs = messageIDs
 		}
@@ -2395,52 +2471,79 @@ func (s *ndjsonTranscriptState) result() ndjsonParseResult {
 
 func consumeNDJSONStream(reader io.Reader, threadID string, sink InferenceStreamSink) (ndjsonParseResult, error) {
 	state := &ndjsonTranscriptState{ActiveAgentIndex: -1}
-	buffered := bufio.NewReader(reader)
-	for {
-		line, err := buffered.ReadBytes('\n')
-		if len(line) > 0 {
-			if handleErr := state.handleLine(line, threadID, sink); handleErr != nil {
-				return state.result(), handleErr
-			}
-			if state.hasTerminalAnswer() {
-				return state.result(), nil
-			}
+	scanner := newNDJSONScanner(reader)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if handleErr := state.handleLine(line, threadID, sink); handleErr != nil {
+			return state.result(), handleErr
 		}
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			return state.result(), err
+		if state.hasTerminalAnswer() {
+			return state.result(), nil
 		}
+	}
+	if err := normalizeNDJSONScanError(scanner.Err()); err != nil {
+		return state.result(), err
 	}
 	return state.result(), nil
 }
 
 var ndjsonIdleAfterAnswerTimeout = 5 * time.Second
+var errNDJSONLineTooLarge = errors.New("ndjson line too large")
+
+const (
+	ndjsonScannerInitialBuffer = 64 * 1024
+	ndjsonMaxLineBytes         = 16 * 1024 * 1024
+)
 
 type ndjsonReadEvent struct {
 	line []byte
 	err  error
 }
 
+func newNDJSONScanner(reader io.Reader) *bufio.Scanner {
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 0, ndjsonScannerInitialBuffer), ndjsonMaxLineBytes)
+	return scanner
+}
+
+func normalizeNDJSONScanError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, bufio.ErrTooLong) {
+		return fmt.Errorf("%w: exceeds %d bytes", errNDJSONLineTooLarge, ndjsonMaxLineBytes)
+	}
+	return err
+}
+
 func consumeNDJSONStreamWithIdleClose(reader io.ReadCloser, threadID string, sink InferenceStreamSink, idleAfterAnswer time.Duration) (ndjsonParseResult, error) {
 	state := &ndjsonTranscriptState{ActiveAgentIndex: -1}
-	buffered := bufio.NewReader(reader)
 	events := make(chan ndjsonReadEvent, 1)
 	done := make(chan struct{})
 	defer close(done)
 
 	go func() {
-		for {
-			line, err := buffered.ReadBytes('\n')
+		scanner := newNDJSONScanner(reader)
+		for scanner.Scan() {
+			line := append([]byte(nil), scanner.Bytes()...)
 			select {
-			case events <- ndjsonReadEvent{line: line, err: err}:
+			case events <- ndjsonReadEvent{line: line}:
 			case <-done:
 				return
 			}
-			if err != nil {
+		}
+		if err := normalizeNDJSONScanError(scanner.Err()); err != nil {
+			select {
+			case events <- ndjsonReadEvent{err: err}:
+			case <-done:
 				return
 			}
+			return
+		}
+		select {
+		case events <- ndjsonReadEvent{err: io.EOF}:
+		case <-done:
+			return
 		}
 	}()
 

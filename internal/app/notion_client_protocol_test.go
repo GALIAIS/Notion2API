@@ -3,10 +3,23 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"expvar"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 )
+
+func resetNotionTransportCacheForTest() {
+	notionTransportCache.mu.Lock()
+	defer notionTransportCache.mu.Unlock()
+	for _, transport := range notionTransportCache.items {
+		if transport != nil {
+			transport.CloseIdleConnections()
+		}
+	}
+	notionTransportCache.items = map[notionHTTPTransportCacheKey]*http.Transport{}
+	notionHTTPTransportCacheMetric.Init()
+}
 
 func newProtocolTestClient(cfg AppConfig) *NotionAIClient {
 	cfg.APIKey = "test-api-key"
@@ -216,4 +229,147 @@ func TestPostJSONResponseAddsResinAccountHeaderWhenEnabled(t *testing.T) {
 	if got, want := capturedHeader, "alice"; got != want {
 		t.Fatalf("%s = %q, want %q", defaultResinAccountHeader, got, want)
 	}
+}
+
+func TestNewNotionAIClientWithModeReusesTransportForSameConfigAndAccount(t *testing.T) {
+	resetNotionTransportCacheForTest()
+	cfg := defaultConfig()
+	cfg.APIKey = "test-api-key"
+	session := SessionInfo{
+		ClientVersion: "test-client-version",
+		UserID:        "test-user",
+		SpaceID:       "test-space",
+		Cookies: []ProbeCookie{{
+			Name:  "token_v2",
+			Value: "test-cookie",
+		}},
+	}
+	first := newNotionAIClientWithMode(session, cfg, "alice@example.com", false)
+	second := newNotionAIClientWithMode(session, cfg, "alice@example.com", false)
+	streaming := newNotionAIClientWithMode(session, cfg, "alice@example.com", true)
+
+	if first.HTTPClient == nil || second.HTTPClient == nil || streaming.HTTPClient == nil {
+		t.Fatalf("expected HTTP clients to be initialized")
+	}
+	if first.HTTPClient.Transport == nil || second.HTTPClient.Transport == nil || streaming.HTTPClient.Transport == nil {
+		t.Fatalf("expected transports to be initialized")
+	}
+	if first.HTTPClient.Transport != second.HTTPClient.Transport {
+		t.Fatalf("expected transport reuse for same account/config")
+	}
+	if first.HTTPClient.Transport != streaming.HTTPClient.Transport {
+		t.Fatalf("expected streaming and standard clients to share transport cache")
+	}
+	if first.HTTPClient.Timeout <= 0 {
+		t.Fatalf("expected non-streaming timeout to be configured")
+	}
+	if streaming.HTTPClient.Timeout != 0 {
+		t.Fatalf("expected streaming client timeout to be disabled, got %s", streaming.HTTPClient.Timeout)
+	}
+}
+
+func TestNewNotionAIClientWithModeSeparatesTransportWhenProxyPolicyDiffers(t *testing.T) {
+	resetNotionTransportCacheForTest()
+	cfg := defaultConfig()
+	cfg.APIKey = "test-api-key"
+	cfg.Accounts = []NotionAccount{
+		{
+			Email:     "alice@example.com",
+			ProxyMode: proxyModeHTTP,
+			ProxyURL:  "http://127.0.0.1:18080",
+		},
+		{
+			Email:     "bob@example.com",
+			ProxyMode: proxyModeHTTP,
+			ProxyURL:  "http://127.0.0.1:28080",
+		},
+	}
+	session := SessionInfo{
+		ClientVersion: "test-client-version",
+		UserID:        "test-user",
+		SpaceID:       "test-space",
+		Cookies: []ProbeCookie{{
+			Name:  "token_v2",
+			Value: "test-cookie",
+		}},
+	}
+	alice := newNotionAIClientWithMode(session, cfg, "alice@example.com", false)
+	bob := newNotionAIClientWithMode(session, cfg, "bob@example.com", false)
+
+	if alice.HTTPClient == nil || bob.HTTPClient == nil {
+		t.Fatalf("expected HTTP clients to be initialized")
+	}
+	if alice.HTTPClient.Transport == nil || bob.HTTPClient.Transport == nil {
+		t.Fatalf("expected transports to be initialized")
+	}
+	if alice.HTTPClient.Transport == bob.HTTPClient.Transport {
+		t.Fatalf("expected separate transports when account proxy policy differs")
+	}
+}
+
+func TestCachedNotionHTTPTransportRecordsCacheMetrics(t *testing.T) {
+	resetNotionTransportCacheForTest()
+	cfg := defaultConfig()
+	cfg.APIKey = "test-api-key"
+	session := SessionInfo{
+		ClientVersion: "test-client-version",
+		UserID:        "test-user",
+		SpaceID:       "test-space",
+		Cookies: []ProbeCookie{{
+			Name:  "token_v2",
+			Value: "test-cookie",
+		}},
+	}
+	_ = newNotionAIClientWithMode(session, cfg, "alice@example.com", false)
+	_ = newNotionAIClientWithMode(session, cfg, "alice@example.com", false)
+	_ = newNotionAIClientWithMode(session, cfg, "alice@example.com", true)
+
+	mustAtLeast := func(label string, wantMin int64) {
+		var got int64
+		if v := notionHTTPTransportCacheMetric.Get(label); v != nil {
+			got = v.(*expvar.Int).Value()
+		}
+		if got < wantMin {
+			t.Fatalf("metric %s too small: got %d want >= %d", label, got, wantMin)
+		}
+	}
+	mustAtLeast("miss_new", 1)
+	mustAtLeast("hit_rlock", 1)
+}
+
+func BenchmarkNewNotionAIClientWithModeTransportCache(b *testing.B) {
+	cfg := defaultConfig()
+	cfg.APIKey = "test-api-key"
+	session := SessionInfo{
+		ClientVersion: "test-client-version",
+		UserID:        "test-user",
+		SpaceID:       "test-space",
+		Cookies: []ProbeCookie{{
+			Name:  "token_v2",
+			Value: "test-cookie",
+		}},
+	}
+
+	b.Run("warm_cache", func(b *testing.B) {
+		resetNotionTransportCacheForTest()
+		_ = newNotionAIClientWithMode(session, cfg, "alice@example.com", false)
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			client := newNotionAIClientWithMode(session, cfg, "alice@example.com", false)
+			if client == nil || client.HTTPClient == nil || client.HTTPClient.Transport == nil {
+				b.Fatalf("expected client with transport")
+			}
+		}
+	})
+
+	b.Run("cold_cache_reset_each_iter", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			resetNotionTransportCacheForTest()
+			client := newNotionAIClientWithMode(session, cfg, "alice@example.com", false)
+			if client == nil || client.HTTPClient == nil || client.HTTPClient.Transport == nil {
+				b.Fatalf("expected client with transport")
+			}
+		}
+	})
 }

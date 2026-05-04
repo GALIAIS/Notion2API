@@ -87,7 +87,7 @@ func (a *App) accountRuntimeSummary(cfg AppConfig, account NotionAccount) map[st
 		"consecutive_failures":   account.ConsecutiveFailures,
 		"total_successes":        account.TotalSuccesses,
 		"total_failures":         account.TotalFailures,
-		"active":                 canonicalEmailKey(cfg.ActiveAccount) == canonicalEmailKey(account.Email),
+		"active":                 canonicalEmailKey(cfg.ActiveAccount) == getAccountEmailKey(account),
 	}
 	if status, err := readLoginStatusFile(account.PendingStatePath); err == nil {
 		item["login_status"] = status
@@ -262,9 +262,9 @@ func (a *App) handleAdminAccounts(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		writeJSON(w, http.StatusOK, a.buildAccountsPayload())
 	case http.MethodPost:
-		payload, err := decodeBody(r)
+		payload, err := a.decodeBody(w, r)
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+			writeInvalidBodyError(w, err)
 			return
 		}
 		account, makeActive, err := decodeAccountPayload(payload)
@@ -286,11 +286,12 @@ func (a *App) handleAdminAccounts(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
 			return
 		}
+		a.invalidateDispatchProbeCache()
 		writeJSON(w, http.StatusOK, a.buildAccountsPayload())
 	case http.MethodPut:
-		payload, err := decodeBody(r)
+		payload, err := a.decodeBody(w, r)
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+			writeInvalidBodyError(w, err)
 			return
 		}
 		email := accountEmailFromPayload(payload)
@@ -314,7 +315,7 @@ func (a *App) handleAdminAccounts(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		cfg.Accounts[index] = ensureAccountPaths(cfg, next)
-		if canonicalEmailKey(cfg.ActiveAccount) == canonicalEmailKey(next.Email) && next.Disabled {
+		if canonicalEmailKey(cfg.ActiveAccount) == getAccountEmailKey(next) && next.Disabled {
 			cfg.ActiveAccount = ""
 			cfg.ProbeJSON = ""
 		}
@@ -330,6 +331,7 @@ func (a *App) handleAdminAccounts(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
 			return
 		}
+		a.invalidateDispatchProbeCache()
 		writeJSON(w, http.StatusOK, a.buildAccountsPayload())
 	default:
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
@@ -362,6 +364,7 @@ func (a *App) handleAdminAccountDelete(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
 		return
 	}
+	a.invalidateDispatchProbeCache()
 	writeJSON(w, http.StatusOK, a.buildAccountsPayload())
 }
 
@@ -373,9 +376,9 @@ func (a *App) handleAdminAccountsActivate(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
 		return
 	}
-	payload, err := decodeBody(r)
+	payload, err := a.decodeBody(w, r)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+		writeInvalidBodyError(w, err)
 		return
 	}
 	email := strings.TrimSpace(stringValue(payload["email"]))
@@ -400,6 +403,7 @@ func (a *App) handleAdminAccountsActivate(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
 		return
 	}
+	a.invalidateDispatchProbeCache()
 	writeJSON(w, http.StatusOK, a.buildAccountsPayload())
 }
 
@@ -411,9 +415,9 @@ func (a *App) handleAdminAccountsTest(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
 		return
 	}
-	payload, err := decodeBody(r)
+	payload, err := a.decodeBody(w, r)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+		writeInvalidBodyError(w, err)
 		return
 	}
 	cfg, _, registry := a.State.Snapshot()
@@ -676,9 +680,9 @@ func (a *App) handleAdminAccountManualImport(w http.ResponseWriter, r *http.Requ
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
 		return
 	}
-	payload, err := decodeBody(r)
+	payload, err := a.decodeBody(w, r)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+		writeInvalidBodyError(w, err)
 		return
 	}
 	req, err := decodeManualImportRequest(payload)
@@ -750,6 +754,7 @@ func (a *App) handleAdminAccountManualImport(w http.ResponseWriter, r *http.Requ
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
 		return
 	}
+	a.invalidateDispatchProbeCache()
 	cfg, _, _ = a.State.Snapshot()
 	account, _, _ = cfg.FindAccount(accountEmail)
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -767,9 +772,9 @@ func (a *App) handleAdminAccountLoginStart(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
 		return
 	}
-	payload, err := decodeBody(r)
+	payload, err := a.decodeBody(w, r)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+		writeInvalidBodyError(w, err)
 		return
 	}
 	email := strings.TrimSpace(stringValue(payload["email"]))
@@ -819,6 +824,7 @@ func (a *App) handleAdminAccountLoginStart(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
 		return
 	}
+	a.invalidateDispatchProbeCache()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"success": true,
 		"account": a.accountRuntimeSummary(cfg, account),
@@ -834,9 +840,9 @@ func (a *App) handleAdminAccountLoginVerify(w http.ResponseWriter, r *http.Reque
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
 		return
 	}
-	payload, err := decodeBody(r)
+	payload, err := a.decodeBody(w, r)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+		writeInvalidBodyError(w, err)
 		return
 	}
 	email := strings.TrimSpace(stringValue(payload["email"]))
@@ -893,6 +899,7 @@ func (a *App) handleAdminAccountLoginVerify(w http.ResponseWriter, r *http.Reque
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
 		return
 	}
+	a.invalidateDispatchProbeCache()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"success": true,
 		"account": a.accountRuntimeSummary(cfg, account),

@@ -426,9 +426,9 @@ func (a *App) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	payload, err := decodeBody(r)
+	payload, err := a.decodeBody(w, r)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+		writeInvalidBodyError(w, err)
 		return
 	}
 	if !securePasswordEqual(password, stringValue(payload["password"])) {
@@ -671,9 +671,9 @@ func (a *App) handleAdminTest(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"detail": "method not allowed"})
 		return
 	}
-	payload, err := decodeBody(r)
+	payload, err := a.decodeBody(w, r)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
+		writeInvalidBodyError(w, err)
 		return
 	}
 	cfg, _, registry := a.State.Snapshot()

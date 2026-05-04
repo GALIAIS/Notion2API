@@ -6,6 +6,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"unicode"
 )
 
@@ -56,7 +57,7 @@ func builtinModelDefinitions() []ModelDefinition {
 
 func buildModelRegistry(cfg AppConfig) ModelRegistry {
 	entries := builtinModelDefinitions()
-	if probeEntries := extractProbeModelDefinitions(cfg.ProbeJSON); len(probeEntries) > 0 {
+	if probeEntries := extractProbeModelDefinitions(collectProbeModelPaths(cfg)); len(probeEntries) > 0 {
 		entries = mergeModelDefinitions(entries, probeEntries)
 	}
 	if len(cfg.Models) > 0 {
@@ -98,6 +99,27 @@ func buildModelRegistry(cfg AppConfig) ModelRegistry {
 	return ModelRegistry{Entries: entries, ByID: byID, AliasToID: aliasToID}
 }
 
+func collectProbeModelPaths(cfg AppConfig) []string {
+	paths := make([]string, 0, len(cfg.Accounts)+1)
+	seen := map[string]struct{}{}
+	appendPath := func(path string) {
+		clean := strings.TrimSpace(path)
+		if clean == "" {
+			return
+		}
+		if _, exists := seen[clean]; exists {
+			return
+		}
+		seen[clean] = struct{}{}
+		paths = append(paths, clean)
+	}
+	appendPath(cfg.ProbeJSON)
+	for _, account := range cfg.Accounts {
+		appendPath(account.ProbeJSON)
+	}
+	return paths
+}
+
 func (r ModelRegistry) Resolve(value string, fallback string) (ModelDefinition, error) {
 	candidate := strings.TrimSpace(value)
 	if candidate == "" {
@@ -118,7 +140,54 @@ func (r ModelRegistry) Resolve(value string, fallback string) (ModelDefinition, 
 	return ModelDefinition{}, fmt.Errorf("unknown model: %s", candidate)
 }
 
-func extractProbeModelDefinitions(path string) []ModelDefinition {
+func extractProbeModelDefinitions(paths []string) []ModelDefinition {
+	if len(paths) == 0 {
+		return nil
+	}
+	parseConcurrency := len(paths)
+	if parseConcurrency > 4 {
+		parseConcurrency = 4
+	}
+	if parseConcurrency < 1 {
+		parseConcurrency = 1
+	}
+	type indexedResult struct {
+		index int
+		items []ModelDefinition
+	}
+	results := make([]indexedResult, len(paths))
+	sem := make(chan struct{}, parseConcurrency)
+	var wg sync.WaitGroup
+	for i, path := range paths {
+		wg.Add(1)
+		go func(index int, probePath string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			results[index] = indexedResult{
+				index: index,
+				items: extractProbeModelDefinitionsFromPath(probePath),
+			}
+		}(i, path)
+	}
+	wg.Wait()
+
+	seen := map[string]struct{}{}
+	out := make([]ModelDefinition, 0)
+	for _, result := range results {
+		for _, item := range result.items {
+			key := item.ID + "|" + item.NotionModel
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+func extractProbeModelDefinitionsFromPath(path string) []ModelDefinition {
 	if strings.TrimSpace(path) == "" {
 		return nil
 	}

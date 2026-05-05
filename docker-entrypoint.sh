@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-CONFIG_PATH="${NOTION2API_CONFIG_PATH:-/app/config/config.json}"
+CONFIG_PATH="${NOTION2API_CONFIG_PATH:-/app/data/config.json}"
 DEFAULT_CONFIG_PATH="${NOTION2API_DEFAULT_CONFIG_PATH:-/app/config/config.default.json}"
 
 if [ ! -f "$CONFIG_PATH" ] && [ -f "$DEFAULT_CONFIG_PATH" ]; then

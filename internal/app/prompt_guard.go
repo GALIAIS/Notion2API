@@ -169,7 +169,16 @@ func promptGuardPrepareRequest(cfg AppConfig, request PromptRunRequest) PromptRu
 	profile, step := resolvePromptGuardProfile(cfg, request)
 	request.PromptProfileOverride = string(profile)
 	request.PromptEscalationStep = step
-	request.HiddenPrompt = stripPromptGuardSections(request.HiddenPrompt)
+	hiddenPrompt := stripPromptGuardSections(request.HiddenPrompt)
+	guardSection := buildPromptGuardSection(cfg, profile)
+	if guardSection != "" {
+		parts := []string{promptGuardOpenTag + "\n" + guardSection + "\n" + promptGuardCloseTag}
+		if hiddenPrompt != "" {
+			parts = append(parts, hiddenPrompt)
+		}
+		hiddenPrompt = strings.Join(parts, "\n\n")
+	}
+	request.HiddenPrompt = hiddenPrompt
 	return request
 }
 

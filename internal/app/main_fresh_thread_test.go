@@ -29,6 +29,49 @@ func newFreshThreadTestApp(t *testing.T) *App {
 	return &App{State: state}
 }
 
+func TestNormalizeChatInputMovesSystemAndDeveloperMessagesToHiddenPrompt(t *testing.T) {
+	normalized, err := normalizeChatInput(map[string]any{
+		"messages": []any{
+			map[string]any{"role": "system", "content": "Stay in character."},
+			map[string]any{"role": "developer", "content": "Use concise replies."},
+			map[string]any{"role": "user", "content": "Hello"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("normalizeChatInput failed: %v", err)
+	}
+	if got := normalized.Prompt; got != "Hello" {
+		t.Fatalf("prompt mismatch: got %q want %q", got, "Hello")
+	}
+	if strings.Contains(normalized.Prompt, "Stay in character") || strings.Contains(normalized.Prompt, "Use concise") {
+		t.Fatalf("system/developer instructions leaked into visible prompt: %q", normalized.Prompt)
+	}
+	for _, want := range []string{"[system]\nStay in character.", "[developer]\nUse concise replies."} {
+		if !strings.Contains(normalized.HiddenPrompt, want) {
+			t.Fatalf("hidden prompt missing %q in %q", want, normalized.HiddenPrompt)
+		}
+	}
+}
+
+func TestPromptGuardPrepareRequestInjectsConfiguredProfile(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Prompt.CognitiveReframingPrefix = "Use the configured assistant behavior."
+
+	prepared := promptGuardPrepareRequest(cfg, PromptRunRequest{
+		HiddenPrompt: "[system]\nStay in character.",
+	})
+
+	if !strings.Contains(prepared.HiddenPrompt, "<prompt-guard>\nUse the configured assistant behavior.\n</prompt-guard>") {
+		t.Fatalf("hidden prompt missing prompt guard section: %q", prepared.HiddenPrompt)
+	}
+	if !strings.Contains(prepared.HiddenPrompt, "[system]\nStay in character.") {
+		t.Fatalf("hidden prompt did not preserve client system instructions: %q", prepared.HiddenPrompt)
+	}
+	if prepared.PromptProfileOverride != "cognitive_reframing" {
+		t.Fatalf("profile mismatch: got %q", prepared.PromptProfileOverride)
+	}
+}
+
 func seedCompletedConversation(t *testing.T, app *App, conversationID string, userText string, assistantText string, threadID string) ConversationEntry {
 	t.Helper()
 	entry := app.State.conversations().Create(ConversationCreateRequest{

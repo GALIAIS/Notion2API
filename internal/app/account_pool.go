@@ -251,7 +251,7 @@ func (a *App) runPromptWithSession(ctx context.Context, cfg AppConfig, session S
 		}
 		return client.RunPromptStream(ctx, current, forward)
 	}
-	return execute(ctx, request, onDelta)
+	return runPromptWithPromptGuard(ctx, cfg, request, onDelta, execute)
 }
 
 func (a *App) runPromptWithSessionWithSink(ctx context.Context, cfg AppConfig, session SessionInfo, accountEmail string, request PromptRunRequest, sink InferenceStreamSink) (InferenceResult, error) {
@@ -266,7 +266,7 @@ func (a *App) runPromptWithSessionWithSink(ctx context.Context, cfg AppConfig, s
 		client = newNotionAIClient(session, cfg, accountEmail)
 	}
 	if sink.Reasoning != nil || sink.ReasoningWarmup != nil || sink.KeepAlive != nil {
-		return client.RunPromptStreamWithSink(ctx, request, sink)
+		return client.RunPromptStreamWithSink(ctx, promptGuardPrepareRequest(cfg, request), sink)
 	}
 	execute := func(ctx context.Context, current PromptRunRequest, forward func(string) error) (InferenceResult, error) {
 		if forward == nil {
@@ -279,5 +279,5 @@ func (a *App) runPromptWithSessionWithSink(ctx context.Context, cfg AppConfig, s
 			KeepAlive:       sink.KeepAlive,
 		})
 	}
-	return execute(ctx, request, sink.Text)
+	return runPromptWithPromptGuard(ctx, cfg, request, sink.Text, execute)
 }

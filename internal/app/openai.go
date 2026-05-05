@@ -156,6 +156,7 @@ func extractChatConversationPromptSegment(message map[string]any) (*conversation
 	if role == "" {
 		role = "user"
 	}
+	normalizedRole := strings.ToLower(strings.TrimSpace(role))
 	text, atts, err := parseStructuredContent(message["content"])
 	if err != nil {
 		return nil, nil, nil, err
@@ -169,11 +170,17 @@ func extractChatConversationPromptSegment(message map[string]any) (*conversation
 	if visibleText == "" && len(atts) > 0 && strings.EqualFold(role, "user") {
 		visibleText = defaultUploadedAttachmentPrompt
 	}
-	if role == "tool" || visibleText == "" {
+	if normalizedRole == "system" || normalizedRole == "developer" {
+		if visibleText != "" {
+			hiddenParts = append(hiddenParts, formatConversationPromptSection(normalizedRole, visibleText))
+		}
+		return nil, hiddenParts, atts, nil
+	}
+	if normalizedRole == "tool" || visibleText == "" {
 		return nil, hiddenParts, atts, nil
 	}
 	return &conversationPromptSegment{
-		Role: role,
+		Role: normalizedRole,
 		Text: visibleText,
 	}, hiddenParts, atts, nil
 }

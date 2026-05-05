@@ -508,6 +508,15 @@ func firstSpacePointer(pointers []any) (string, string) {
 }
 
 func parseSpacesInitial(payload map[string]any, userID string) loginSpaceBootstrap {
+	if meta := parseLoadUserContentMetadata(payload); meta.SpaceID != "" {
+		return loginSpaceBootstrap{
+			Email:       meta.Email,
+			UserName:    meta.UserName,
+			SpaceID:     meta.SpaceID,
+			SpaceViewID: meta.SpaceViewID,
+		}
+	}
+
 	users := mapValue(payload["users"])
 	userEntry := mapValue(users[userID])
 
@@ -536,6 +545,31 @@ func getSpacesInitial(ctx context.Context, session *loginHTTPSession, upstream N
 		return loginSpaceBootstrap{}, fmt.Errorf("getSpacesInitial returned empty space_id")
 	}
 	return result, nil
+}
+
+func loginSpaceBootstrapFromMetadata(meta discoveredAccountMetadata) loginSpaceBootstrap {
+	return loginSpaceBootstrap{
+		Email:       meta.Email,
+		UserName:    meta.UserName,
+		SpaceID:     meta.SpaceID,
+		SpaceViewID: meta.SpaceViewID,
+	}
+}
+
+func discoverSpacesAfterLogin(ctx context.Context, session *loginHTTPSession, upstream NotionUpstream, clientVersion string, userID string) (loginSpaceBootstrap, error) {
+	meta, loadErr := fetchLoadUserContentMetadata(ctx, session, upstream, clientVersion, userID)
+	if loadErr == nil && meta.SpaceID != "" {
+		return loginSpaceBootstrapFromMetadata(meta), nil
+	}
+
+	spaces, spacesErr := getSpacesInitial(ctx, session, upstream, clientVersion, userID)
+	if spacesErr == nil {
+		return spaces, nil
+	}
+	if loadErr != nil {
+		return loginSpaceBootstrap{}, fmt.Errorf("loadUserContent failed: %v; getSpacesInitial failed: %w", loadErr, spacesErr)
+	}
+	return loginSpaceBootstrap{}, spacesErr
 }
 
 func loginBaseState(email string, profileDir string, pendingPath string, storageStatePath string, probePath string) loginPendingState {
@@ -707,7 +741,7 @@ func VerifyEmailLogin(ctx context.Context, cfg AppConfig, req LoginVerifyRequest
 		return failLoginState(req.PendingPath, pending, fmt.Errorf("notion_user_id missing after OTP verify"))
 	}
 
-	spaces, err := getSpacesInitial(ctx, session, upstream, clientVersion, userID)
+	spaces, err := discoverSpacesAfterLogin(ctx, session, upstream, clientVersion, userID)
 	if err != nil {
 		return failLoginState(req.PendingPath, pending, wrapLoginStageError(cfg, upstream, "load spaces after login", err))
 	}

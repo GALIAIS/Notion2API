@@ -145,8 +145,13 @@ func fetchLoadUserContentMetadata(ctx context.Context, session *loginHTTPSession
 	return meta, nil
 }
 
-func fetchAvailableModelsMetadata(ctx context.Context, session *loginHTTPSession, upstream NotionUpstream, clientVersion string, activeUserID string) ([]ModelDefinition, error) {
-	payload, err := postNotionLoginJSON(ctx, session, upstream, upstream.API("getAvailableModels"), clientVersion, upstream.HomeURL(), activeUserID, map[string]any{})
+func fetchAvailableModelsMetadata(ctx context.Context, session *loginHTTPSession, upstream NotionUpstream, clientVersion string, activeUserID string, spaceID string) ([]ModelDefinition, error) {
+	spaceID = strings.TrimSpace(spaceID)
+	if spaceID == "" {
+		return nil, fmt.Errorf("getAvailableModels requires a space_id")
+	}
+	body := map[string]any{"spaceId": spaceID}
+	payload, err := postNotionLoginJSON(ctx, session, upstream, upstream.API("getAvailableModels"), clientVersion, upstream.HomeURL(), activeUserID, body)
 	if err != nil {
 		return nil, err
 	}
@@ -220,7 +225,7 @@ func discoverImportedAccountMetadata(ctx context.Context, cfg AppConfig, account
 	}
 
 	if strings.TrimSpace(meta.ClientVersion) != "" {
-		if models, err := fetchAvailableModelsMetadata(ctx, session, upstream, meta.ClientVersion, firstNonEmpty(meta.UserID, lookupUserID)); err == nil {
+		if models, err := fetchAvailableModelsMetadata(ctx, session, upstream, meta.ClientVersion, firstNonEmpty(meta.UserID, lookupUserID), meta.SpaceID); err == nil {
 			meta.Models = models
 		}
 	}

@@ -49,6 +49,21 @@ export function DashboardPanel({
   const healthLabel = healthPayload?.session_ready ? 'READY' : healthPayload?.ok ? 'NO SESSION' : 'UNKNOWN';
   const sessionReady = Boolean(accountsPayload?.session_ready);
 
+  const tools = configPayload?.config?.tools;
+  const mcpServers = configPayload?.config?.mcp_servers || [];
+  const toolsEnabled = tools?.enabled !== false;
+  const enabledMCPServers = mcpServers.filter((server) => server.enabled).length;
+  const toolLines: Array<[string, boolean | string]> = [
+    ['工具调用', toolsEnabled],
+    ['规划模式', String(tools?.planning_mode || 'router')],
+    ['单轮调用上限', String(tools?.max_calls_per_turn ?? 1)],
+    ['最大轮数', String(tools?.max_rounds ?? 16)],
+    ['结果截断', String(tools?.result_char_limit ?? 4000)],
+    ['只读工具并行', tools?.parallel_readonly !== false],
+    ['轮询策略', String(configPayload?.config?.dispatch?.strategy || 'active_first')],
+    ['MCP 服务器', `${enabledMCPServers} / ${mcpServers.length} 启用`],
+  ];
+
   return (
     <div className="space-y-7">
       <PanelHeader
@@ -82,6 +97,20 @@ export function DashboardPanel({
           <InfoCard title="默认能力开关" description="当前默认能力位，可在设置面调整。">
             <div className="grid gap-2.5 sm:grid-cols-2 xl:grid-cols-2">
               {featureLines.map(([label, value]) => (
+                <div
+                  key={label}
+                  className="surface-subtle flex items-center justify-between gap-3 px-3.5 py-3"
+                >
+                  <div className="min-w-0 text-[12.5px] font-semibold leading-5">{label}</div>
+                  <div className="shrink-0">{featureBadge(value)}</div>
+                </div>
+              ))}
+            </div>
+          </InfoCard>
+
+          <InfoCard title="工具调用与调度" description="工具循环预算、MCP 宿主与账号轮询策略。">
+            <div className="grid gap-2.5 sm:grid-cols-2 xl:grid-cols-2">
+              {toolLines.map(([label, value]) => (
                 <div
                   key={label}
                   className="surface-subtle flex items-center justify-between gap-3 px-3.5 py-3"

@@ -2,11 +2,13 @@ module notion2api
 
 go 1.25.0
 
-require modernc.org/sqlite v1.33.1
+require (
+	github.com/enetx/g v1.0.224
+	modernc.org/sqlite v1.33.1
+)
 
 require (
 	github.com/andybalholm/brotli v1.2.1 // indirect
-	github.com/enetx/g v1.0.224 // indirect
 	github.com/enetx/http v1.0.28 // indirect
 	github.com/enetx/http2 v1.0.26 // indirect
 	github.com/enetx/http3 v1.0.7 // indirect

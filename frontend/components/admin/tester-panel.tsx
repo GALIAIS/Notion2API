@@ -1,19 +1,93 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
-import { Copy, FileImage, Search, SendHorizonal, Sparkles, type LucideIcon } from 'lucide-react';
+import {
+  Activity,
+  Copy,
+  FileImage,
+  Plug,
+  RefreshCw,
+  Search,
+  SendHorizonal,
+  Sparkles,
+  Stethoscope,
+  type LucideIcon,
+} from 'lucide-react';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
-import { InfoCard, JsonPreview, MetaTile, PanelHeader, StatCard } from '@/components/admin/shared';
+import { EmptyHint, InfoCard, JsonPreview, MetaTile, PanelHeader, StatCard, Subsection } from '@/components/admin/shared';
 import { copyText, readFilesAsAttachments } from '@/lib/services/core/api-client';
-import type { ModelItem } from '@/lib/services/admin/types';
+import type {
+  DiagnosticCheck,
+  DiagnosticStatus,
+  DiagnosticsPayload,
+  MCPPayload,
+  ModelItem,
+} from '@/lib/services/admin/types';
 
 const SELECT_TRIGGER_CLASS = 'h-10 w-full rounded-lg border-input bg-transparent';
+
+// Mirrors the check names accepted by POST /admin/diagnostics. An empty
+// selection means "run everything", so the UI always sends an explicit list.
+const DIAGNOSTIC_CHECKS: Array<{ name: string; label: string; description: string }> = [
+  { name: 'account_pool', label: '账号池调度', description: '统计可派发账号、阻塞原因与剩余并发，不请求上游。' },
+  { name: 'mcp', label: 'MCP 服务器', description: '检查已配置的 MCP 进程是否存活并能列出工具。' },
+  { name: 'chat', label: '对话可用性', description: '发送一次探针 prompt，验证账号派发与上游推理。' },
+  { name: 'tool_call', label: '工具调用可用性', description: '按当前规划模式诱导一次工具调用并解析结果。' },
+];
+
+const DIAGNOSTIC_STATUS_META: Record<DiagnosticStatus, { label: string; variant: 'success' | 'destructive' | 'soft' | 'secondary' }> = {
+  pass: { label: '通过', variant: 'success' },
+  warn: { label: '警告', variant: 'soft' },
+  fail: { label: '失败', variant: 'destructive' },
+  skipped: { label: '跳过', variant: 'secondary' },
+};
+
+function DiagnosticStatusBadge({ status }: { status?: string }) {
+  const meta = DIAGNOSTIC_STATUS_META[(status || '') as DiagnosticStatus];
+  if (!meta) {
+    return <Badge variant="secondary" className="normal-case">{status || 'unknown'}</Badge>;
+  }
+  return <Badge variant={meta.variant} className="normal-case">{meta.label}</Badge>;
+}
+
+function DiagnosticRow({ check }: { check: DiagnosticCheck }) {
+  const [expanded, setExpanded] = useState(false);
+  const hasData = Boolean(check.data && Object.keys(check.data).length);
+  return (
+    <div className="surface-subtle min-w-0 px-4 py-3.5">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <DiagnosticStatusBadge status={check.status} />
+          <span className="truncate text-sm font-semibold tracking-tight">{check.label || check.name}</span>
+          <code className="rounded bg-muted px-1 text-[11px] text-muted-foreground">{check.name}</code>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-muted-foreground">{check.duration_ms} ms</span>
+          {hasData ? (
+            <Button variant="ghost" size="sm" onClick={() => setExpanded((value) => !value)}>
+              {expanded ? '收起' : '详情'}
+            </Button>
+          ) : null}
+        </div>
+      </div>
+      {check.detail ? (
+        <p className="mt-2 break-all text-[13px] leading-6 text-muted-foreground">{check.detail}</p>
+      ) : null}
+      {expanded && hasData ? (
+        <pre className="code-surface pretty-scroll mt-3 max-h-72 overflow-auto whitespace-pre-wrap border px-3 py-2 font-mono text-[12px] leading-6">
+          {JSON.stringify(check.data, null, 2)}
+        </pre>
+      ) : null}
+    </div>
+  );
+}
 
 function buildTesterConversationID(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -56,6 +130,10 @@ export function TesterPanel({
   defaultModel,
   defaultWebSearch,
   onRun,
+  onRunDiagnostics,
+  onLoadMCP,
+  onReloadMCP,
+  onCallMCPTool,
 }: {
   models: ModelItem[];
   defaultModel?: string;
@@ -67,6 +145,10 @@ export function TesterPanel({
     attachments: Awaited<ReturnType<typeof readFilesAsAttachments>>;
     conversation_id?: string;
   }) => Promise<unknown>;
+  onRunDiagnostics: (payload: { model?: string; checks?: string[] }) => Promise<DiagnosticsPayload>;
+  onLoadMCP: () => Promise<MCPPayload>;
+  onReloadMCP: () => Promise<MCPPayload>;
+  onCallMCPTool: (payload: { name: string; arguments?: Record<string, unknown> }) => Promise<unknown>;
 }) {
   const [prompt, setPrompt] = useState('');
   const [model, setModel] = useState(defaultModel || models[0]?.id || 'auto');
@@ -77,9 +159,133 @@ export function TesterPanel({
   const [output, setOutput] = useState('等待运行...');
   const [running, setRunning] = useState(false);
 
+  const [selectedChecks, setSelectedChecks] = useState<string[]>(() => DIAGNOSTIC_CHECKS.map((item) => item.name));
+  const [diagnostics, setDiagnostics] = useState<DiagnosticsPayload | null>(null);
+  const [diagnosing, setDiagnosing] = useState(false);
+
+  const [mcp, setMCP] = useState<MCPPayload | null>(null);
+  const [mcpLoading, setMCPLoading] = useState(false);
+  const [mcpTool, setMCPTool] = useState('');
+  const [mcpArguments, setMCPArguments] = useState('{}');
+  const [mcpOutput, setMCPOutput] = useState('尚未调用工具。');
+  const [mcpCalling, setMCPCalling] = useState(false);
+
   const fileLabels = useMemo(() => files.map((file) => file.name), [files]);
   const promptLength = useMemo(() => prompt.trim().length, [prompt]);
   const normalizedConversationID = useMemo(() => conversationID.trim(), [conversationID]);
+
+  const diagnosticChecks = diagnostics?.checks ?? [];
+  const diagnosticSummary = diagnostics?.summary;
+  const mcpTools = mcp?.tools ?? [];
+
+  // The backend only tracks runtime state for servers it actually launched, so a
+  // configured-but-disabled entry never shows up in `servers`. Merge the two
+  // lists so those still render as 已禁用 instead of vanishing from the console.
+  const mcpServers = useMemo(() => {
+    const runtime = mcp?.servers ?? [];
+    const configured = mcp?.configured ?? [];
+    const running = new Map(runtime.map((server) => [server.name, server]));
+    const merged = [...runtime];
+    configured.forEach((server) => {
+      if (!running.has(server.name)) merged.push(server);
+    });
+    return merged;
+  }, [mcp?.configured, mcp?.servers]);
+
+  function toggleCheck(name: string, checked: boolean) {
+    setSelectedChecks((current) => {
+      if (checked) {
+        return current.includes(name) ? current : [...current, name];
+      }
+      return current.filter((item) => item !== name);
+    });
+  }
+
+  async function performDiagnostics() {
+    if (!selectedChecks.length) {
+      toast.error('请至少选择一项自检');
+      return;
+    }
+    setDiagnosing(true);
+    try {
+      const payload = await onRunDiagnostics({ model, checks: selectedChecks });
+      setDiagnostics(payload);
+      const failed = payload.summary?.failed ?? 0;
+      const warned = payload.summary?.warned ?? 0;
+      if (failed > 0) {
+        toast.error(`自检完成，${failed} 项失败`);
+      } else if (warned > 0) {
+        toast.warning(`自检完成，${warned} 项警告`);
+      } else {
+        toast.success('自检全部通过');
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '自检失败';
+      setDiagnostics(null);
+      toast.error(message);
+    } finally {
+      setDiagnosing(false);
+    }
+  }
+
+  const loadMCP = useCallback(
+    async (reload: boolean) => {
+      setMCPLoading(true);
+      try {
+        const payload = reload ? await onReloadMCP() : await onLoadMCP();
+        setMCP(payload);
+        if (reload) {
+          toast.success('MCP 服务器已重载');
+        }
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : '读取 MCP 状态失败');
+      } finally {
+        setMCPLoading(false);
+      }
+    },
+    [onLoadMCP, onReloadMCP],
+  );
+
+  // Pull MCP status once on mount so the section is not empty before the
+  // operator interacts with it. A missing/disabled host simply yields no servers.
+  useEffect(() => {
+    void loadMCP(false);
+  }, [loadMCP]);
+
+  async function performMCPCall() {
+    const name = mcpTool.trim();
+    if (!name) {
+      toast.error('请选择要调用的 MCP 工具');
+      return;
+    }
+    let parsed: Record<string, unknown> = {};
+    const rawArguments = mcpArguments.trim();
+    if (rawArguments) {
+      try {
+        const value: unknown = JSON.parse(rawArguments);
+        if (!value || typeof value !== 'object' || Array.isArray(value)) {
+          throw new Error('参数必须是 JSON 对象');
+        }
+        parsed = value as Record<string, unknown>;
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : '参数不是合法 JSON');
+        return;
+      }
+    }
+    setMCPCalling(true);
+    setMCPOutput('调用中...');
+    try {
+      const payload = await onCallMCPTool({ name, arguments: parsed });
+      setMCPOutput(JSON.stringify(payload, null, 2));
+      toast.success('工具调用完成');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '工具调用失败';
+      setMCPOutput(message);
+      toast.error(message);
+    } finally {
+      setMCPCalling(false);
+    }
+  }
 
   const summaryCards = [
     { label: '当前模型', value: model || '-', hint: '本次测试目标模型' },
@@ -305,6 +511,166 @@ export function TesterPanel({
           <JsonPreview title="输出" value={output} minHeight={320} />
         </aside>
       </div>
+
+      <InfoCard
+        title="可用性自检"
+        description="逐项检查账号池、MCP、对话与工具调用链路；每项独立汇报，单项失败不会掩盖其他结果。"
+        actions={
+          <Button disabled={diagnosing} onClick={() => void performDiagnostics()}>
+            <Stethoscope className="size-4" />
+            {diagnosing ? '自检中...' : '开始自检'}
+          </Button>
+        }
+      >
+        <div className="space-y-5">
+          <Subsection
+            eyebrow="Checks"
+            title="选择检查项"
+            description="对话与工具调用会真实请求上游并消耗账号额度；账号池与 MCP 仅读取本地状态。"
+            icon={Activity}
+          >
+            <div className="grid gap-3 md:grid-cols-2">
+              {DIAGNOSTIC_CHECKS.map((item) => (
+                <div key={item.name} className="surface-subtle min-w-0 px-4 py-3.5">
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="min-w-0 space-y-1">
+                      <div className="text-sm font-semibold tracking-tight">{item.label}</div>
+                      <p className="text-[13px] leading-6 text-muted-foreground">{item.description}</p>
+                    </div>
+                    <Switch
+                      checked={selectedChecks.includes(item.name)}
+                      onCheckedChange={(checked) => toggleCheck(item.name, checked)}
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </Subsection>
+
+          {diagnosticSummary ? (
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+              <StatCard label="检查项" value={String(diagnosticSummary.total ?? diagnosticChecks.length)} hint={diagnostics?.model ? `模型 ${diagnostics.model}` : undefined} />
+              <StatCard label="通过" value={String(diagnosticSummary.passed ?? 0)} hint="含跳过项" />
+              <StatCard label="警告" value={String(diagnosticSummary.warned ?? 0)} hint="链路可用但行为不理想" />
+              <StatCard label="失败" value={String(diagnosticSummary.failed ?? 0)} hint={diagnostics?.account ? `账号 ${diagnostics.account}` : '未指定账号'} />
+            </div>
+          ) : null}
+
+          {diagnosticChecks.length ? (
+            <div className="grid gap-3">
+              {diagnosticChecks.map((check) => (
+                <DiagnosticRow key={check.name} check={check} />
+              ))}
+            </div>
+          ) : (
+            <EmptyHint title="尚未自检" description="选择检查项后点击开始自检，结果会逐项列在这里。" />
+          )}
+        </div>
+      </InfoCard>
+
+      <InfoCard
+        title="MCP 工具"
+        description="查看内置 MCP 宿主的进程状态与聚合工具清单，并可直接调用工具做验证。"
+        actions={
+          <>
+            <Button variant="outline" disabled={mcpLoading} onClick={() => void loadMCP(false)}>
+              <RefreshCw className="size-4" />
+              刷新
+            </Button>
+            <Button variant="outline" disabled={mcpLoading} onClick={() => void loadMCP(true)}>
+              <Plug className="size-4" />
+              重载服务器
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-5">
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+            <MetaTile label="工具调用开关" value={mcp?.tools_enabled === false ? '已关闭' : '已开启'} />
+            <MetaTile label="规划模式" value={mcp?.planning_mode || '—'} />
+            <MetaTile label="服务器数" value={String(mcpServers.length)} />
+            <MetaTile label="工具总数" value={String(mcpTools.length)} />
+          </div>
+
+          {mcpServers.length ? (
+            <div className="grid gap-3">
+              {mcpServers.map((server) => (
+                <div key={server.name} className="surface-subtle min-w-0 px-4 py-3.5">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex min-w-0 items-center gap-2.5">
+                      <Badge variant={server.alive ? 'success' : server.enabled === false ? 'secondary' : 'destructive'} className="normal-case">
+                        {server.alive ? '运行中' : server.enabled === false ? '已禁用' : '未运行'}
+                      </Badge>
+                      <span className="truncate text-sm font-semibold tracking-tight">{server.name}</span>
+                      <span className="text-xs text-muted-foreground">{server.tool_count ?? 0} 个工具</span>
+                    </div>
+                    <span className="text-xs text-muted-foreground">重启 {server.restart_count ?? 0} 次</span>
+                  </div>
+                  {server.command ? (
+                    <code className="mt-2 block break-all text-[12px] text-muted-foreground">
+                      {[server.command, ...(server.args ?? [])].join(' ')}
+                    </code>
+                  ) : null}
+                  {server.last_error ? (
+                    <p className="mt-2 break-all text-[13px] leading-6 text-destructive">{server.last_error}</p>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <EmptyHint
+              title="未配置 MCP 服务器"
+              description="在设置页的 mcp_servers 中添加条目并设为 enabled 后，网关会自行拉起进程并聚合工具。"
+            />
+          )}
+
+          {mcpTools.length ? (
+            <Subsection eyebrow="Invoke" title="直接调用工具" description="工具名为 server.tool 形式；参数需为 JSON 对象。注意真实工具可能产生副作用。" icon={Plug}>
+              <div className="grid gap-4">
+                <div className="grid gap-4 lg:grid-cols-2">
+                  <div className="grid gap-2">
+                    <Label className="text-sm font-semibold tracking-tight">工具</Label>
+                    <Select value={mcpTool} onValueChange={setMCPTool}>
+                      <SelectTrigger className={SELECT_TRIGGER_CLASS}>
+                        <SelectValue placeholder="选择工具" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {mcpTools.map((tool) => (
+                          <SelectItem key={tool.name} value={tool.name}>
+                            {tool.name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <p className="text-xs leading-5 text-muted-foreground">
+                      {mcpTools.find((tool) => tool.name === mcpTool)?.description || '选择工具后显示描述。'}
+                    </p>
+                  </div>
+                  <div className="grid gap-2">
+                    <Label htmlFor="mcp-arguments" className="text-sm font-semibold tracking-tight">参数（JSON）</Label>
+                    <Textarea
+                      id="mcp-arguments"
+                      value={mcpArguments}
+                      onChange={(event) => setMCPArguments(event.target.value)}
+                      placeholder='{"key": "value"}'
+                      className="min-h-[104px] rounded-lg bg-transparent font-mono text-[12px] leading-6"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <Button disabled={mcpCalling || !mcpTool} onClick={() => void performMCPCall()}>
+                    <SendHorizonal className="size-4" />
+                    {mcpCalling ? '调用中...' : '调用工具'}
+                  </Button>
+                </div>
+                <pre className="code-surface pretty-scroll max-h-80 overflow-auto whitespace-pre-wrap border px-4 py-3 font-mono text-[12px] leading-6">
+                  {mcpOutput}
+                </pre>
+              </div>
+            </Subsection>
+          ) : null}
+        </div>
+      </InfoCard>
     </div>
   );
 }

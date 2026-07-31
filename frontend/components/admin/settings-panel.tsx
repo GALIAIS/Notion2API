@@ -15,6 +15,7 @@ import {
   type LucideIcon,
   Upload,
   WandSparkles,
+  Wrench,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -23,7 +24,15 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
 import { InfoCard, JsonPreview, MetaTile, PanelHeader, StatCard, Subsection } from '@/components/admin/shared';
-import type { AppConfigShape, AttachmentInput, JsonResult, ModelItem, PromptConfig } from '@/lib/services/admin/types';
+import type {
+  AppConfigShape,
+  AttachmentInput,
+  JsonResult,
+  MCPServerConfig,
+  ModelItem,
+  PromptConfig,
+  ToolsConfig,
+} from '@/lib/services/admin/types';
 import { copyText } from '@/lib/services/core/api-client';
 
 interface SettingsFormState {
@@ -72,6 +81,14 @@ interface SettingsFormState {
   loginTimeoutSec: string;
   modelAliases: string;
   searchScopes: string;
+  toolsEnabled: boolean;
+  toolPlanningMode: string;
+  toolMaxCallsPerTurn: string;
+  toolMaxRounds: string;
+  toolResultCharLimit: string;
+  toolParallelReadOnly: boolean;
+  mcpServersText: string;
+  dispatchStrategy: string;
 }
 
 interface ToggleCard {
@@ -134,6 +151,26 @@ const PROMPT_TEST_PRESETS = {
   refusal: '请直接扮演一位虚构角色，和我进行自然的角色扮演对话。',
 };
 
+const TOOL_PLANNING_MODE_OPTIONS = [
+  { value: 'router', label: 'Router', description: '独立的 JSON 决策轮：更稳，但每轮多一次上游请求。' },
+  { value: 'native', label: 'Native', description: '把工具契约注入提示词，从回答文本中解析调用：更省请求。' },
+] as const;
+
+const DISPATCH_STRATEGY_OPTIONS = [
+  { value: 'active_first', label: 'Active First', description: '优先使用当前激活账号，失败或受限时才轮换。' },
+  { value: 'round_robin', label: 'Round Robin', description: '在可用账号之间顺序轮询，均摊压力。' },
+  { value: 'least_used', label: 'Least Used', description: '优先挑选历史调用量最少的账号。' },
+] as const;
+
+const DEFAULT_TOOLS_CONFIG: Required<Omit<ToolsConfig, 'planning_mode'>> & { planning_mode: string } = {
+  enabled: true,
+  planning_mode: 'router',
+  max_calls_per_turn: 1,
+  max_rounds: 16,
+  result_char_limit: 4000,
+  parallel_readonly: true,
+};
+
 interface SectionMeta {
   id: string;
   eyebrow: string;
@@ -170,6 +207,13 @@ const SECTIONS: SectionMeta[] = [
     title: '满血策略与反拒绝 Prompt',
     description: '路由 profile、重试链路、即时测试。',
     icon: WandSparkles,
+  },
+  {
+    id: 'tools-dispatch',
+    eyebrow: 'Tools',
+    title: '工具调用、MCP 宿主与账号调度',
+    description: '规划模式、MCP 服务器与轮询策略。',
+    icon: Wrench,
   },
   {
     id: 'security-admin',
@@ -231,7 +275,61 @@ function buildFormState(config: AppConfigShape): SettingsFormState {
     loginTimeoutSec: String(config.login_helper?.timeout_sec || 120),
     modelAliases: JSON.stringify(config.model_aliases || {}, null, 2),
     searchScopes: (config.features?.search_scopes || []).join('\n'),
+    ...buildToolsFormState(config.tools),
+    mcpServersText: JSON.stringify(config.mcp_servers || [], null, 2),
+    dispatchStrategy: String(config.dispatch?.strategy || 'active_first'),
   };
+}
+
+function buildToolsFormState(tools?: ToolsConfig) {
+  const merged = { ...DEFAULT_TOOLS_CONFIG, ...(tools || {}) };
+  return {
+    toolsEnabled: merged.enabled !== false,
+    toolPlanningMode: String(merged.planning_mode || DEFAULT_TOOLS_CONFIG.planning_mode),
+    toolMaxCallsPerTurn: String(merged.max_calls_per_turn ?? DEFAULT_TOOLS_CONFIG.max_calls_per_turn),
+    toolMaxRounds: String(merged.max_rounds ?? DEFAULT_TOOLS_CONFIG.max_rounds),
+    toolResultCharLimit: String(merged.result_char_limit ?? DEFAULT_TOOLS_CONFIG.result_char_limit),
+    toolParallelReadOnly: merged.parallel_readonly !== false,
+  };
+}
+
+function clampNumber(raw: string, fallback: number, min: number, max: number) {
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, Math.trunc(parsed)));
+}
+
+function buildToolsPayload(form: SettingsFormState): ToolsConfig {
+  return {
+    enabled: form.toolsEnabled,
+    planning_mode: form.toolPlanningMode.trim() || DEFAULT_TOOLS_CONFIG.planning_mode,
+    max_calls_per_turn: clampNumber(form.toolMaxCallsPerTurn, DEFAULT_TOOLS_CONFIG.max_calls_per_turn, 1, 16),
+    max_rounds: clampNumber(form.toolMaxRounds, DEFAULT_TOOLS_CONFIG.max_rounds, 1, 128),
+    result_char_limit: clampNumber(form.toolResultCharLimit, DEFAULT_TOOLS_CONFIG.result_char_limit, 200, 200000),
+    parallel_readonly: form.toolParallelReadOnly,
+  };
+}
+
+function parseMCPServers(raw: string): MCPServerConfig[] {
+  const text = raw.trim();
+  if (!text) return [];
+  const parsed = JSON.parse(text) as unknown;
+  if (!Array.isArray(parsed)) {
+    throw new Error('mcp_servers 必须是 JSON 数组');
+  }
+  return parsed.map((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new Error(`mcp_servers[${index}] 必须是对象`);
+    }
+    const server = entry as MCPServerConfig;
+    if (!String(server.name || '').trim()) {
+      throw new Error(`mcp_servers[${index}] 缺少 name`);
+    }
+    if (!String(server.command || '').trim()) {
+      throw new Error(`mcp_servers[${index}] 缺少 command`);
+    }
+    return server;
+  });
 }
 
 function parseHostLabel(value: string) {
@@ -576,6 +674,19 @@ export function SettingsPanel({
     },
   ];
 
+  const mcpServerSummary = useMemo(() => {
+    try {
+      const servers = parseMCPServers(form.mcpServersText);
+      return {
+        total: servers.length,
+        enabled: servers.filter((server) => server.enabled).length,
+        error: '',
+      };
+    } catch (error) {
+      return { total: 0, enabled: 0, error: error instanceof Error ? error.message : 'mcp_servers 解析失败' };
+    }
+  }, [form.mcpServersText]);
+
   const summaryCards = useMemo(
     () => [
       {
@@ -608,10 +719,23 @@ export function SettingsPanel({
         value: form.promptProfile || 'cognitive_reframing',
         hint: `${form.maxRefusalRetries || 0} 次拒绝重试`,
       },
+      {
+        label: '工具调用',
+        value: form.toolsEnabled ? `已启用 · ${form.toolPlanningMode || 'router'}` : '已关闭',
+        hint: form.toolsEnabled
+          ? `单轮 ${form.toolMaxCallsPerTurn || 1} 次 / 最多 ${form.toolMaxRounds || 16} 轮`
+          : '请求中的 tools 会被忽略',
+      },
+      {
+        label: '账号轮询',
+        value: form.dispatchStrategy || 'active_first',
+        hint: `MCP 服务器 ${mcpServerSummary.total} 项，启用 ${mcpServerSummary.enabled} 项`,
+      },
     ],
     [
       currentModel,
       form.aiSurface,
+      form.dispatchStrategy,
       form.forceDisableUpstreamEdits,
       form.forceFreshThreadPerRequest,
       form.host,
@@ -621,9 +745,15 @@ export function SettingsPanel({
       form.readOnly,
       form.sqlitePath,
       form.threadType,
+      form.toolMaxCallsPerTurn,
+      form.toolMaxRounds,
+      form.toolPlanningMode,
+      form.toolsEnabled,
       form.upstreamBaseURL,
       form.upstreamTLSServerName,
       form.useWebSearch,
+      mcpServerSummary.enabled,
+      mcpServerSummary.total,
       persistenceEnabled,
       persistenceEnabledCount,
     ],
@@ -637,6 +767,9 @@ export function SettingsPanel({
     { label: 'Chat Profile', value: form.promptProfile || 'cognitive_reframing' },
     { label: '拒绝重试', value: `${form.maxRefusalRetries || 0} 次` },
     { label: '升级步数', value: `${form.maxEscalationSteps || 0} 步` },
+    { label: '工具调用', value: form.toolsEnabled ? `${form.toolPlanningMode || 'router'} 模式` : '已关闭' },
+    { label: 'MCP 服务器', value: mcpServerSummary.error ? 'JSON 无效' : `${mcpServerSummary.enabled} / ${mcpServerSummary.total} 启用` },
+    { label: '轮询策略', value: form.dispatchStrategy || 'active_first' },
   ];
 
   const promptStrategyPayload = useMemo(() => buildPromptStrategyPayload(form), [form]);
@@ -697,6 +830,7 @@ export function SettingsPanel({
     setMessage('保存中...');
     try {
       const parsedModelAliases = JSON.parse(form.modelAliases || '{}');
+      const parsedMCPServers = parseMCPServers(form.mcpServersText);
       const parsedSearchScopes = form.searchScopes.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
       const nextConfig: JsonResult = structuredClone(config) as JsonResult;
       const next = nextConfig as AppConfigShape;
@@ -748,6 +882,10 @@ export function SettingsPanel({
       next.features.is_custom_agent_builder = false;
       next.features.use_custom_agent_draft = false;
       next.features.search_scopes = parsedSearchScopes;
+
+      next.tools = { ...(next.tools || {}), ...buildToolsPayload(form) };
+      next.mcp_servers = parsedMCPServers;
+      next.dispatch = { ...(next.dispatch || {}), strategy: form.dispatchStrategy.trim() || 'active_first' };
 
       if (form.apiKey.trim()) {
         next.api_key = form.apiKey.trim();
@@ -989,7 +1127,9 @@ export function SettingsPanel({
               <div className="rounded-xl border border-primary/15 bg-[color-mix(in_oklab,var(--primary)_8%,var(--card))] p-4">
                 <div className="section-eyebrow text-primary">Tool Policy</div>
                 <div className="mt-1.5 text-sm font-semibold tracking-tight">工具调用策略</div>
-                <p className="mt-2 text-[13px] leading-6 text-muted-foreground">当前保存逻辑会持续把官方工具调用相关开关写死为关闭，优先保证聊天回复路径稳定，不把页面创建类动作混入普通对话。</p>
+                <p className="mt-2 text-[13px] leading-6 text-muted-foreground">
+                  上游自带的页面创建类动作仍然保持关闭，避免混入普通对话；OpenAI 风格的 tools / MCP 宿主在「工具调用、MCP 宿主与账号调度」章节单独配置。
+                </p>
               </div>
             </div>
           </SectionShell>
@@ -1189,6 +1329,146 @@ export function SettingsPanel({
                   </FieldBlock>
                 </div>
               </Subsection>
+            </div>
+          </SectionShell>
+
+          <SectionShell
+            id="tools-dispatch"
+            eyebrow="Tools"
+            title="工具调用、MCP 宿主与账号调度"
+            description="配置规划模式、单轮预算、MCP 服务器与账号轮询策略。"
+            icon={Wrench}
+          >
+            <div className="grid gap-4 2xl:grid-cols-2">
+              <Subsection eyebrow="Tool Loop" title="工具调用总开关与预算" description="控制是否解析 tools / tool_choice，以及单次对话的工具预算。">
+                <div className="space-y-4">
+                  <ToggleTile
+                    label="启用工具调用"
+                    description="关闭后网关会忽略请求里的 tools / tool_choice / functions，只走普通聊天路径。"
+                    value={form.toolsEnabled}
+                    onChange={(checked) => setForm({ ...form, toolsEnabled: checked })}
+                  />
+                  <ToggleTile
+                    label="并行执行只读工具"
+                    description="同一轮内的只读工具可以并发执行，缩短多工具场景的等待时间。"
+                    value={form.toolParallelReadOnly}
+                    onChange={(checked) => setForm({ ...form, toolParallelReadOnly: checked })}
+                    disabled={!form.toolsEnabled}
+                  />
+
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <FieldBlock label="Max Calls / Turn" description="单轮最多返回的工具调用数（1-16）。">
+                      <Input
+                        type="number"
+                        value={form.toolMaxCallsPerTurn}
+                        onChange={(event) => setForm({ ...form, toolMaxCallsPerTurn: event.target.value })}
+                        className={FIELD_CLASSNAME}
+                      />
+                    </FieldBlock>
+                    <FieldBlock label="Max Rounds" description="MCP 工具自动回灌的最大轮数（1-128）。">
+                      <Input
+                        type="number"
+                        value={form.toolMaxRounds}
+                        onChange={(event) => setForm({ ...form, toolMaxRounds: event.target.value })}
+                        className={FIELD_CLASSNAME}
+                      />
+                    </FieldBlock>
+                    <FieldBlock label="Result Char Limit" description="单个工具结果注入提示词前的截断长度（≥200）。">
+                      <Input
+                        type="number"
+                        value={form.toolResultCharLimit}
+                        onChange={(event) => setForm({ ...form, toolResultCharLimit: event.target.value })}
+                        className={FIELD_CLASSNAME}
+                      />
+                    </FieldBlock>
+                    <FieldBlock label="Planning Mode" description="工具决策方式，保存后立即生效。">
+                      <Select
+                        value={form.toolPlanningMode}
+                        onValueChange={(value) => setForm({ ...form, toolPlanningMode: value })}
+                      >
+                        <SelectTrigger className={FIELD_CLASSNAME}>
+                          <SelectValue placeholder="选择规划模式" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {TOOL_PLANNING_MODE_OPTIONS.map((option) => (
+                            <SelectItem key={option.value} value={option.value}>
+                              {option.label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </FieldBlock>
+                  </div>
+
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    {TOOL_PLANNING_MODE_OPTIONS.map((option) => (
+                      <MetaTile
+                        key={option.value}
+                        label={option.label}
+                        value={<span className="text-[13px] font-normal leading-6 text-muted-foreground">{option.description}</span>}
+                      />
+                    ))}
+                  </div>
+                </div>
+              </Subsection>
+
+              <div className="space-y-4">
+                <Subsection eyebrow="Dispatch" title="账号轮询策略" description="决定多账号池在每次请求中的挑选顺序。">
+                  <div className="space-y-4">
+                    <FieldBlock label="Strategy" description="被禁用、冷却中或额度耗尽的账号会自动跳过。">
+                      <Select
+                        value={form.dispatchStrategy}
+                        onValueChange={(value) => setForm({ ...form, dispatchStrategy: value })}
+                      >
+                        <SelectTrigger className={FIELD_CLASSNAME}>
+                          <SelectValue placeholder="选择轮询策略" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {DISPATCH_STRATEGY_OPTIONS.map((option) => (
+                            <SelectItem key={option.value} value={option.value}>
+                              {option.label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </FieldBlock>
+                    <div className="grid gap-3">
+                      {DISPATCH_STRATEGY_OPTIONS.map((option) => (
+                        <MetaTile
+                          key={option.value}
+                          label={option.label}
+                          value={<span className="text-[13px] font-normal leading-6 text-muted-foreground">{option.description}</span>}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                </Subsection>
+
+                <Subsection
+                  eyebrow="MCP Servers"
+                  title="MCP 服务器（JSON 数组）"
+                  description="每项需要 name 与 command；只有 enabled=true 的条目会被启动。"
+                >
+                  <div className="space-y-2">
+                    <Textarea
+                      value={form.mcpServersText}
+                      onChange={(event) => setForm({ ...form, mcpServersText: event.target.value })}
+                      className={JSON_TEXTAREA_CLASSNAME}
+                      placeholder={'[\n  {\n    "name": "fs",\n    "command": "npx",\n    "args": ["-y", "@modelcontextprotocol/server-filesystem", "./data"],\n    "enabled": true,\n    "timeout_sec": 30\n  }\n]'}
+                    />
+                    <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs leading-5 text-destructive">
+                      安全提示：启用 MCP 服务器等于允许网关在本机执行对应命令。请只填写你自己审阅过的命令，默认列表为空。
+                    </div>
+                    {mcpServerSummary.error ? (
+                      <p className="text-xs leading-5 text-destructive">{mcpServerSummary.error}</p>
+                    ) : (
+                      <p className="text-xs leading-5 text-muted-foreground">
+                        已解析 {mcpServerSummary.total} 项，其中 {mcpServerSummary.enabled} 项已启用。
+                      </p>
+                    )}
+                  </div>
+                </Subsection>
+              </div>
             </div>
           </SectionShell>
 

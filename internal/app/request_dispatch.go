@@ -161,7 +161,10 @@ func resolveDispatchCandidatesWithPool(cfg AppConfig, poolCandidates []NotionAcc
 		if len(poolCandidates) == 0 {
 			return nil, noEligibleAccountsError()
 		}
-		return poolCandidates, nil
+		// Rotation happens here rather than in the sort: the sorted order lives in
+		// the config snapshot, which is only rebuilt on config changes, so every
+		// request would otherwise start from the same head account.
+		return applyDispatchStrategyRotation(cfg, poolCandidates), nil
 	}
 	if request.AllowPinnedAccountFallback {
 		var preferred *NotionAccount
@@ -171,7 +174,8 @@ func resolveDispatchCandidatesWithPool(cfg AppConfig, poolCandidates []NotionAcc
 				preferred = &account
 			}
 		}
-		candidates := mergeDispatchCandidates(preferred, poolCandidates)
+		// The pinned account keeps priority; only the fallback tail rotates.
+		candidates := mergeDispatchCandidates(preferred, applyDispatchStrategyRotation(cfg, poolCandidates))
 		if len(candidates) == 0 {
 			return nil, noEligibleAccountsError()
 		}

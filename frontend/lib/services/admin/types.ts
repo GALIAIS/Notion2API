@@ -25,6 +25,87 @@ export interface SessionRefreshRuntime {
   last_error?: string;
 }
 
+export type DiagnosticStatus = 'pass' | 'warn' | 'fail' | 'skipped';
+
+export interface DiagnosticCheck {
+  name: string;
+  label: string;
+  status: DiagnosticStatus;
+  duration_ms: number;
+  detail?: string;
+  data?: Record<string, unknown>;
+}
+
+export interface DiagnosticsPayload {
+  success?: boolean;
+  model?: string;
+  account?: string;
+  summary?: {
+    total?: number;
+    failed?: number;
+    warned?: number;
+    passed?: number;
+  };
+  checks?: DiagnosticCheck[];
+}
+
+export interface MCPToolItem {
+  name: string;
+  description?: string;
+  source?: string;
+}
+
+export interface MCPServerItem {
+  name: string;
+  command?: string;
+  args?: string[];
+  enabled?: boolean;
+  status?: string;
+  alive?: boolean;
+  last_error?: string;
+  started_at?: string;
+  restart_count?: number;
+  tool_count?: number;
+}
+
+export interface MCPPayload {
+  success?: boolean;
+  tools_enabled?: boolean;
+  planning_mode?: string;
+  configured?: MCPServerItem[];
+  servers?: MCPServerItem[];
+  tools?: MCPToolItem[];
+}
+
+export type ToolPlanningMode = 'router' | 'native';
+
+export interface ToolsConfig {
+  enabled?: boolean;
+  planning_mode?: ToolPlanningMode | string;
+  max_calls_per_turn?: number;
+  max_rounds?: number;
+  result_char_limit?: number;
+  parallel_readonly?: boolean;
+}
+
+export interface MCPServerConfig {
+  name?: string;
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  enabled?: boolean;
+  timeout_sec?: number;
+  auto_start?: boolean;
+}
+
+export type DispatchStrategy = 'active_first' | 'round_robin' | 'least_used';
+
+export interface DispatchConfig {
+  strategy?: DispatchStrategy | string;
+  probe_cache_ttl_seconds?: number;
+  [key: string]: unknown;
+}
+
 export interface FeatureConfig {
   use_web_search?: boolean;
   use_read_only_mode?: boolean;
@@ -93,6 +174,9 @@ export interface AppConfigShape {
   };
   prompt?: PromptConfig;
   features?: FeatureConfig;
+  tools?: ToolsConfig;
+  mcp_servers?: MCPServerConfig[];
+  dispatch?: DispatchConfig;
 }
 
 export interface AdminConfigPayload {

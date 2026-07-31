@@ -46,6 +46,7 @@ type ServerState struct {
 	AdminTokens                map[string]time.Time
 	AdminLoginAttempts         map[string]AdminLoginAttempt
 	DispatchProbeCache         *probeCache
+	MCP                        *MCPManager
 	LastSessionRefresh         time.Time
 	LastSessionRefreshError    string
 	responseStoreCleanupCancel context.CancelFunc
@@ -397,6 +398,7 @@ func newServerState(cfg AppConfig) (*ServerState, error) {
 		AdminTokens:        map[string]time.Time{},
 		AdminLoginAttempts: map[string]AdminLoginAttempt{},
 		DispatchProbeCache: newProbeCache(),
+		MCP:                newMCPManager(),
 		Store:              store,
 	}
 	state.ResponseStore = newResponseStore(time.Duration(maxInt(cfg.Responses.StoreTTLSeconds, 1)) * time.Second)
@@ -552,6 +554,15 @@ func (s *ServerState) SaveAndApply(cfg AppConfig) error {
 	s.mu.Unlock()
 	if canonicalEmailKey(current.ActiveAccount) != canonicalEmailKey(cfg.ActiveAccount) && s.DispatchProbeCache != nil {
 		s.DispatchProbeCache.invalidateAll()
+	}
+	// Reconcile MCP subprocesses against the saved config so editing
+	// mcp_servers in the admin console takes effect without a restart. Apply is
+	// a no-op when nothing changed, and stops every server when the list is
+	// emptied. The supervisor is idempotent, so this also covers the case where
+	// the process booted with no servers configured.
+	if s.MCP != nil && !mcpServerListEqual(current.MCPServers, cfg.MCPServers) {
+		s.MCP.Apply(context.Background(), cfg.MCPServers)
+		s.MCP.StartSupervisor(context.Background())
 	}
 	return nil
 }
@@ -718,10 +729,12 @@ func (s *ServerState) Close() error {
 	store := s.Store
 	cancelCleanup := s.responseStoreCleanupCancel
 	sqliteWriter := s.sqliteWriter
+	mcpManager := s.MCP
 	s.mu.RUnlock()
 	if cancelCleanup != nil {
 		cancelCleanup()
 	}
+	mcpManager.Close()
 	if sqliteWriter != nil {
 		sqliteWriter.Close()
 	}
@@ -1711,16 +1724,37 @@ func (a *App) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	} else {
 		request.PinnedAccountEmail = requestedAccount
 	}
+	turn, err := prepareToolTurn(cfg, messages, typed.Tools, typed.Functions, typed.ToolChoice, typed.FunctionCall)
+	if err != nil {
+		writeOpenAIError(w, http.StatusBadRequest, err.Error(), "invalid_request_error", "invalid_tool_protocol")
+		return
+	}
+	turn = a.withMCPTools(turn, cfg.Tools.Enabled)
+	request = turn.applyToolTranscriptPrompt(request)
+	request = turn.attachToRequest(request)
 	request.ConversationID = firstNonEmpty(strings.TrimSpace(conversation.ID), preferredConversationID)
 	conversationID := a.startConversationTurn(conversation.ID, preferredConversationID, "api", "chat_completions", resolveRequestPromptForContinuation(normalized), request)
 	setConversationIDHeader(w, conversationID)
 	stream := typed.Stream
-	if stream {
-		includeUsage := false
-		if typed.StreamIncludeUsage != nil {
-			includeUsage = *typed.StreamIncludeUsage
+	includeUsage := typed.StreamIncludeUsage != nil && *typed.StreamIncludeUsage
+	if turn.Active() && turn.PlanningMode == toolPlanningModeRouter {
+		outcome, nextRequest, nextTurn, routeErr := a.resolveToolTurn(r, request, turn)
+		if routeErr != nil {
+			a.failConversation(conversationID, routeErr)
+			a.writeUpstreamError(w, routeErr)
+			return
 		}
-		a.writeChatCompletionLiveStream(w, r, request, entry.ID, includeUsage, conversationID)
+		request, turn = nextRequest, nextTurn
+		if outcome.HasCalls {
+			a.writeChatCompletionToolCalls(w, r, request, entry.ID, stream, includeUsage, conversationID, turn, outcome.Calls)
+			return
+		}
+	}
+	if turn.Active() {
+		request = turn.applyNativeToolPrompt(request)
+	}
+	if stream {
+		a.writeChatCompletionLiveStreamWithTools(w, r, request, entry.ID, includeUsage, conversationID, turn)
 		return
 	}
 	result, err := a.runPrompt(r, request)
@@ -1730,6 +1764,28 @@ func (a *App) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result = applyInferenceResultOutputPolicy(result, request)
+	if turn.Active() {
+		calls := turn.finalizeToolCalls(extractToolCallsFromText(result.Text, turn.Tools, turn.Choice), "sync")
+		if len(calls) > 0 {
+			// Server-side MCP calls are executed here and fed back to the model;
+			// only client-declared calls are handed to the caller.
+			outcome, nextRequest, nextTurn, loopErr := a.continueToolTurnAfterCalls(r, request, turn, calls)
+			if loopErr != nil {
+				a.failConversation(conversationID, loopErr)
+				a.writeUpstreamError(w, loopErr)
+				return
+			}
+			request, turn = nextRequest, nextTurn
+			if outcome.HasCalls {
+				a.writeChatCompletionToolCalls(w, r, request, entry.ID, false, false, conversationID, turn, outcome.Calls)
+				return
+			}
+			if strings.TrimSpace(outcome.Result.Text) != "" {
+				result = outcome.Result
+			}
+		}
+		result.Text = stripToolCallMarkup(result.Text, turn.Tools)
+	}
 	responsePayload := buildChatCompletion(result, entry.ID, cfg.DebugUpstream)
 	attachConversationResponseMetadata(responsePayload, conversationID, result.ThreadID)
 	setThreadIDHeader(w, result.ThreadID)
@@ -1931,11 +1987,35 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 	if freshThreadMode && strings.TrimSpace(conversation.ID) == "" {
 		request.Prompt = buildFreshThreadReplayPromptFromStoredResponse(normalized.PreviousResponsePrompt, latestPrompt, normalized.Attachments, request.Prompt)
 	}
+	turn, err := prepareToolTurnFromResponsesInput(cfg, typed.Input, typed.Tools, typed.ToolChoice)
+	if err != nil {
+		writeOpenAIError(w, http.StatusBadRequest, err.Error(), "invalid_request_error", "invalid_tool_protocol")
+		return
+	}
+	turn = a.withMCPTools(turn, cfg.Tools.Enabled)
+	request = turn.applyToolTranscriptPrompt(request)
+	request = turn.attachToRequest(request)
 	request.ConversationID = firstNonEmpty(strings.TrimSpace(conversation.ID), preferredConversationID)
 	conversationID := a.startConversationTurn(conversation.ID, preferredConversationID, "api", "responses", resolveRequestPromptForContinuation(normalized), request)
 	setConversationIDHeader(w, conversationID)
+	if turn.Active() && turn.PlanningMode == toolPlanningModeRouter {
+		outcome, nextRequest, nextTurn, routeErr := a.resolveToolTurn(r, request, turn)
+		if routeErr != nil {
+			a.failConversation(conversationID, routeErr)
+			a.writeUpstreamError(w, routeErr)
+			return
+		}
+		request, turn = nextRequest, nextTurn
+		if outcome.HasCalls {
+			a.writeResponsesToolCalls(w, request, outcome.Calls, entry.ID, stream, conversationID)
+			return
+		}
+	}
+	if turn.Active() {
+		request = turn.applyNativeToolPrompt(request)
+	}
 	if stream {
-		a.writeResponsesLiveStream(w, r, request, entry.ID, cfg.DebugUpstream, conversationID)
+		a.writeResponsesLiveStreamWithTools(w, r, request, entry.ID, cfg.DebugUpstream, conversationID, turn)
 		return
 	}
 	result, err := a.runPrompt(r, request)
@@ -1945,6 +2025,26 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result = applyInferenceResultOutputPolicy(result, request)
+	if turn.Active() {
+		calls := turn.finalizeToolCalls(extractToolCallsFromText(result.Text, turn.Tools, turn.Choice), "sync")
+		if len(calls) > 0 {
+			outcome, nextRequest, nextTurn, loopErr := a.continueToolTurnAfterCalls(r, request, turn, calls)
+			if loopErr != nil {
+				a.failConversation(conversationID, loopErr)
+				a.writeUpstreamError(w, loopErr)
+				return
+			}
+			request, turn = nextRequest, nextTurn
+			if outcome.HasCalls {
+				a.writeResponsesToolCalls(w, request, outcome.Calls, entry.ID, false, conversationID)
+				return
+			}
+			if strings.TrimSpace(outcome.Result.Text) != "" {
+				result = outcome.Result
+			}
+		}
+		result.Text = stripToolCallMarkup(result.Text, turn.Tools)
+	}
 	responsePayload := buildResponsesOutputWithIDs(
 		result,
 		entry.ID,
@@ -2051,6 +2151,10 @@ func (a *App) writeChatCompletionStream(w http.ResponseWriter, r *http.Request, 
 }
 
 func (a *App) writeChatCompletionLiveStream(w http.ResponseWriter, r *http.Request, request PromptRunRequest, modelID string, includeUsage bool, conversationID string) {
+	a.writeChatCompletionLiveStreamWithTools(w, r, request, modelID, includeUsage, conversationID, toolTurnContext{})
+}
+
+func (a *App) writeChatCompletionLiveStreamWithTools(w http.ResponseWriter, r *http.Request, request PromptRunRequest, modelID string, includeUsage bool, conversationID string, turn toolTurnContext) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeOpenAIError(w, http.StatusInternalServerError, "streaming is not supported by this response writer", "api_error", "stream_unsupported")
@@ -2159,14 +2263,25 @@ func (a *App) writeChatCompletionLiveStream(w http.ResponseWriter, r *http.Reque
 			}
 		}()
 	}
+	// When the request carries tools, buffer any text that could still turn out
+	// to be a fenced tool call instead of streaming it as a final answer.
+	var toolGate *toolStreamGate
+	emitStreamText := func(delta string) error {
+		if delta == "" {
+			return nil
+		}
+		a.pushConversationDelta(conversationID, delta)
+		return emitContent(delta)
+	}
+	if turn.Active() {
+		toolGate = newToolStreamGate(turn.Tools, emitStreamText)
+	}
+	streamText := emitStreamText
+	if toolGate != nil {
+		streamText = toolGate.Push
+	}
 	result, err := a.runPromptStreamWithSink(r, request, InferenceStreamSink{
-		Text: func(delta string) error {
-			if delta == "" {
-				return nil
-			}
-			a.pushConversationDelta(conversationID, delta)
-			return emitContent(delta)
-		},
+		Text:            streamText,
 		Reasoning:       emitReasoning,
 		ReasoningWarmup: emitReasoningWarmup,
 		KeepAlive:       emitKeepAlive,
@@ -2212,6 +2327,50 @@ func (a *App) writeChatCompletionLiveStream(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	result = applyInferenceResultOutputPolicy(result, request)
+	if toolGate != nil {
+		calls, pendingText := toolGate.Finalize(result.Text, turn.Choice)
+		if calls = turn.finalizeToolCalls(calls, "stream"); len(calls) > 0 {
+			// A tool call replaces the assistant answer for this turn. Emit the
+			// plan text only if nothing was streamed yet, so the client never sees
+			// a partial answer followed by an unrelated preamble.
+			summary := toolPlanSummary(calls)
+			if emittedVisibleText.Len() == 0 {
+				if err := emitContent(summary); err != nil {
+					return
+				}
+			}
+			if err := startStream(); err != nil {
+				return
+			}
+			for index, call := range calls {
+				if err := safeWriteData(buildChatStreamChunk(completionID, created, modelID, []map[string]any{
+					buildToolCallStreamDeltaChoice(0, call, index),
+				}, nil)); err != nil {
+					return
+				}
+			}
+			toolResult := result
+			toolResult.Text = summary
+			a.completeConversation(conversationID, toolResult)
+			a.persistConversationSession(conversationID, request, toolResult)
+			finalUsage := map[string]any{}
+			if includeUsage {
+				finalUsage = buildUsage(request.Prompt, summary, "")
+			}
+			_ = safeWriteData(buildChatStreamChunk(completionID, created, modelID, []map[string]any{
+				buildChatStreamFinishChoice(0, "tool_calls"),
+			}, finalUsage))
+			safeWriteDone()
+			return
+		}
+		// No tool call materialized, so the buffered remainder is ordinary text.
+		result.Text = stripToolCallMarkup(result.Text, turn.Tools)
+		if pendingText != "" {
+			if err := emitStreamText(pendingText); err != nil {
+				return
+			}
+		}
+	}
 	a.completeConversation(conversationID, result)
 	a.persistConversationSession(conversationID, request, result)
 	if request.ClientProfile == sillyTavernClientProfile && !request.SuppressUpstreamThreadPersistence {
@@ -2244,6 +2403,10 @@ func (a *App) writeChatCompletionLiveStream(w http.ResponseWriter, r *http.Reque
 }
 
 func (a *App) writeResponsesLiveStream(w http.ResponseWriter, r *http.Request, request PromptRunRequest, modelID string, includeTrace bool, conversationID string) {
+	a.writeResponsesLiveStreamWithTools(w, r, request, modelID, includeTrace, conversationID, toolTurnContext{})
+}
+
+func (a *App) writeResponsesLiveStreamWithTools(w http.ResponseWriter, r *http.Request, request PromptRunRequest, modelID string, includeTrace bool, conversationID string, turn toolTurnContext) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeOpenAIError(w, http.StatusInternalServerError, "streaming is not supported by this response writer", "api_error", "stream_unsupported")
@@ -2370,14 +2533,26 @@ func (a *App) writeResponsesLiveStream(w http.ResponseWriter, r *http.Request, r
 		_ = emitReasoningWarmup()
 	}
 
+	// When the request carries tools, hold back text that could still resolve
+	// into a fenced tool call instead of streaming it as the final answer.
+	var toolGate *toolStreamGate
+	emitStreamText := func(delta string) error {
+		if delta == "" {
+			return nil
+		}
+		a.pushConversationDelta(conversationID, delta)
+		return emitTextDelta(delta)
+	}
+	if turn.Active() {
+		toolGate = newToolStreamGate(turn.Tools, emitStreamText)
+	}
+	streamText := emitStreamText
+	if toolGate != nil {
+		streamText = toolGate.Push
+	}
+
 	result, err := a.runPromptStreamWithSink(r, request, InferenceStreamSink{
-		Text: func(delta string) error {
-			if delta == "" {
-				return nil
-			}
-			a.pushConversationDelta(conversationID, delta)
-			return emitTextDelta(delta)
-		},
+		Text:            streamText,
 		Reasoning:       emitReasoningDelta,
 		ReasoningWarmup: emitReasoningWarmup,
 		KeepAlive:       emitKeepAlive,
@@ -2444,12 +2619,35 @@ func (a *App) writeResponsesLiveStream(w http.ResponseWriter, r *http.Request, r
 	}
 
 	result = applyInferenceResultOutputPolicy(result, request)
-	finalText := result.Text
-	if strings.TrimSpace(result.Text) == "" && strings.TrimSpace(finalText) != "" {
-		result.Text = finalText
-	} else if strings.TrimSpace(result.Text) != finalText {
-		result.Text = finalText
+	if toolGate != nil {
+		calls, pendingText := toolGate.Finalize(result.Text, turn.Choice)
+		if calls = turn.finalizeToolCalls(calls, "stream"); len(calls) > 0 {
+			a.finishResponsesStreamWithToolCalls(responsesToolStreamContext{
+				emit:            safeWriteEvent,
+				done:            safeWriteDone,
+				emitText:        emitTextDelta,
+				alreadyEmitted:  emittedVisibleText.Len() > 0,
+				responseID:      responseID,
+				outputItemID:    outputItemID,
+				modelID:         modelID,
+				createdAt:       createdAt,
+				conversationID:  conversationID,
+				request:         request,
+				calls:           calls,
+				reasoningClosed: &reasoningPhaseDone,
+				reasoningText:   emittedReasoning.String(),
+			})
+			return
+		}
+		// No call materialized, so the buffered remainder is ordinary text.
+		result.Text = stripToolCallMarkup(result.Text, turn.Tools)
+		if pendingText != "" {
+			if err := emitStreamText(pendingText); err != nil {
+				return
+			}
+		}
 	}
+	finalText := result.Text
 	if remainingReasoning := textDeltaSuffix(emittedReasoning.String(), result.Reasoning); remainingReasoning != "" {
 		if err := emitReasoningDelta(remainingReasoning); err != nil {
 			return
@@ -2715,6 +2913,11 @@ func Main() {
 	app := &App{State: state}
 	state.StartSessionRefreshLoop(context.Background())
 	app.StartEphemeralConversationCleanupLoop(context.Background())
+	// MCP subprocesses are opt-in: only servers with enabled=true are launched.
+	if runtimeCfg, _, _ := state.Snapshot(); len(runtimeCfg.MCPServers) > 0 {
+		state.MCP.Apply(context.Background(), runtimeCfg.MCPServers)
+		state.MCP.StartSupervisor(context.Background())
+	}
 	if cfg.Debug.PprofEnabled {
 		go func(addr string) {
 			log.Printf("[pprof] listening on http://%s/debug/pprof/ (local debug endpoint; avoid public exposure)", addr)

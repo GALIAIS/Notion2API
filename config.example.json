@@ -73,8 +73,28 @@
     "auto_switch_account": true
   },
   "dispatch": {
-    "probe_cache_ttl_seconds": 45
+    "probe_cache_ttl_seconds": 45,
+    "strategy": "active_first"
   },
+  "tools": {
+    "enabled": true,
+    "planning_mode": "router",
+    "max_calls_per_turn": 1,
+    "max_rounds": 16,
+    "result_char_limit": 4000,
+    "parallel_readonly": true
+  },
+  "mcp_servers": [
+    {
+      "name": "filesystem",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allowed/dir"],
+      "env": {},
+      "enabled": false,
+      "timeout_sec": 30,
+      "auto_start": true
+    }
+  ],
   "browser": {
     "helper_pool_size": 0
   },

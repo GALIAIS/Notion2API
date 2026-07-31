@@ -313,6 +313,10 @@ type PromptRunRequest struct {
 	ForceLocalConversationContinue    bool
 	SessionRepeatTurn                 bool
 	ForceSessionRepeatTurn            bool
+	Tools                             []ToolDefinition
+	ToolChoice                        any
+	ToolPlanningMode                  string
+	toolLedger                        *agentLedger
 	attachmentThreadReady             bool
 	continuationDraft                 *continuationTurnDraft
 	continuationScaffold              *continuationTurnScaffold

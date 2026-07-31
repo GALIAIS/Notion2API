@@ -801,6 +801,14 @@ func (a *App) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		a.handleAdminVersion(w, r)
 	case r.URL.Path == "/admin/test":
 		a.handleAdminTest(w, r)
+	case r.URL.Path == "/admin/diagnostics":
+		a.handleAdminDiagnostics(w, r)
+	case r.URL.Path == "/admin/mcp":
+		a.handleAdminMCP(w, r)
+	case r.URL.Path == "/admin/mcp/reload":
+		a.handleAdminMCPReload(w, r)
+	case r.URL.Path == "/admin/mcp/call":
+		a.handleAdminMCPCall(w, r)
 	case r.URL.Path == "/admin/events":
 		a.handleAdminEvents(w, r)
 	case r.URL.Path == "/admin/conversations":
@@ -821,6 +829,8 @@ func (a *App) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		a.handleAdminAccountLoginVerify(w, r)
 	case r.URL.Path == "/admin/accounts/manual":
 		a.handleAdminAccountManualImport(w, r)
+	case r.URL.Path == "/admin/accounts/batch":
+		a.handleAdminAccountsBatch(w, r)
 	case r.URL.Path == "/admin/accounts/login/status":
 		a.handleAdminAccountLoginStatus(w, r)
 	case strings.HasPrefix(r.URL.Path, "/admin/accounts/"):

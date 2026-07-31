@@ -10,8 +10,10 @@ import {
   Rocket,
   ShieldCheck,
   Trash2,
+  Users,
   WandSparkles,
 } from 'lucide-react';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -59,6 +61,19 @@ interface ProbeDraft {
   client_version?: string;
 }
 
+interface BatchImportResult {
+  email?: string;
+  ok?: boolean;
+  action?: string;
+  detail?: string;
+}
+
+const BATCH_ACTION_LABEL: Record<string, string> = {
+  login_started: '已发起登录',
+  imported: '已导入',
+  activated: '已激活',
+};
+
 const FIELD_CLASS = 'h-10 rounded-lg bg-transparent';
 const TEXTAREA_CLASS = 'rounded-lg bg-transparent';
 const PROBE_TEXTAREA_CLASS =
@@ -99,8 +114,14 @@ function safeParseProbeJSON(raw: string): ProbeDraft | null {
   return parsed;
 }
 
-function quotaText(item: AccountItem) {
-  if (!item.quota_limited) return 'unlimited';
+function splitEmailList(raw: string): string[] {
+  return raw
+    .split(/[\s,;]+/)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function quotaText(item: AccountItem) {  if (!item.quota_limited) return 'unlimited';
   return `${item.remaining_quota ?? 0}/${item.hourly_quota ?? 0}`;
 }
 
@@ -177,6 +198,7 @@ export function AccountsPanel({
   onActivate,
   onDelete,
   onSaveAccountSettings,
+  onBatchAddAccounts,
 }: {
   accountsPayload: AccountsPayload | null;
   models: ModelItem[];
@@ -189,6 +211,7 @@ export function AccountsPanel({
   onActivate: (email: string) => Promise<unknown>;
   onDelete: (email: string) => Promise<unknown>;
   onSaveAccountSettings: (payload: JsonResult) => Promise<unknown>;
+  onBatchAddAccounts: (payload: JsonResult) => Promise<unknown>;
 }) {
   const items = accountsPayload?.items || [];
   const activeAccount = accountsPayload?.active_account || '';
@@ -208,6 +231,13 @@ export function AccountsPanel({
   const [manual, setManual] = useState<ManualImportState>(defaultManualImportState);
   const [manualHint, setManualHint] = useState('');
   const [manualBusy, setManualBusy] = useState(false);
+
+  const [batchEmails, setBatchEmails] = useState('');
+  const [batchText, setBatchText] = useState('');
+  const [batchActive, setBatchActive] = useState('');
+  const [batchHint, setBatchHint] = useState('');
+  const [batchBusy, setBatchBusy] = useState(false);
+  const [batchResults, setBatchResults] = useState<BatchImportResult[]>([]);
 
   const [quickTestEmail, setQuickTestEmail] = useState('');
   const [quickTestModel, setQuickTestModel] = useState(defaultModel || models[0]?.id || 'auto');
@@ -426,6 +456,47 @@ export function AccountsPanel({
       toast.error(message);
     } finally {
       setManualBusy(false);
+    }
+  }
+
+  async function performBatchImport() {
+    const emails = splitEmailList(batchEmails);
+    const text = batchText.trim();
+    const active = batchActive.trim();
+    if (!emails.length && !text) {
+      const message = '请至少填写邮箱列表或批量文本';
+      setBatchHint(message);
+      toast.error(message);
+      return;
+    }
+
+    setBatchBusy(true);
+    setBatchHint('批量导入中...');
+    setBatchResults([]);
+    try {
+      const payload: JsonResult = {};
+      if (emails.length) payload.emails = emails;
+      if (text) payload.text = text;
+      if (active) payload.active = active;
+
+      const response = (await onBatchAddAccounts(payload)) as { items?: BatchImportResult[] };
+      const results = Array.isArray(response?.items) ? response.items : [];
+      setBatchResults(results);
+
+      const okCount = results.filter((item) => item.ok).length;
+      const failCount = results.length - okCount;
+      setBatchHint(`共 ${results.length} 条，成功 ${okCount} 条，失败 ${failCount} 条`);
+      if (failCount) {
+        toast.error(`批量导入完成：成功 ${okCount} 条，失败 ${failCount} 条`);
+      } else {
+        toast.success(`批量导入成功 ${okCount} 条`);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '批量导入失败';
+      setBatchHint(message);
+      toast.error(message);
+    } finally {
+      setBatchBusy(false);
     }
   }
 
@@ -651,6 +722,96 @@ export function AccountsPanel({
                     />
                   </div>
                   <p className="text-xs leading-5 text-muted-foreground">在上方表单已填的字段优先；Probe JSON 仅补齐未填字段。</p>
+                </div>
+              </Subsection>
+            </div>
+          </InfoCard>
+
+          <InfoCard
+            title="批量导入账号"
+            description="一次最多 50 条：邮箱列表会逐个发起验证码登录，批量文本支持 cookie header / Probe JSON / JSONL 混合。"
+            actions={
+              <div className="text-sm leading-6 text-muted-foreground">
+                {batchHint || '两个输入框可以只填一个，也可以同时填。'}
+              </div>
+            }
+          >
+            <div className="grid gap-4 xl:grid-cols-[minmax(0,0.94fr)_minmax(320px,1.06fr)]">
+              <Subsection eyebrow="Emails" title="邮箱列表" description="换行、逗号或分号分隔；会逐个发起验证码登录，之后在上方管线里填码。">
+                <div className="space-y-5">
+                  <DetailField label="邮箱" hint="每行一个 name@example.com；重复项和格式错误会单独标记失败。">
+                    <Textarea
+                      value={batchEmails}
+                      onChange={(event) => setBatchEmails(event.target.value)}
+                      className={[TEXTAREA_CLASS, 'min-h-[160px]'].join(' ')}
+                      placeholder={'a@example.com\nb@example.com'}
+                    />
+                  </DetailField>
+
+                  <DetailField label="导入后激活" hint="填写其中一个邮箱，导入完成后设为当前默认账号；留空则不切换。">
+                    <Input
+                      value={batchActive}
+                      onChange={(event) => setBatchActive(event.target.value)}
+                      className={FIELD_CLASS}
+                      placeholder="a@example.com"
+                    />
+                  </DetailField>
+
+                  <Button
+                    className="w-full justify-center"
+                    disabled={batchBusy}
+                    onClick={() => void performBatchImport()}
+                  >
+                    <Users className="size-4" />
+                    {batchBusy ? '批量导入中...' : '批量导入账号'}
+                  </Button>
+
+                  {batchResults.length ? (
+                    <div className="space-y-2">
+                      <div className="text-sm font-semibold tracking-tight">导入结果</div>
+                      <ScrollArea className="pretty-scroll h-[220px] pr-3">
+                        <div className="space-y-2 pb-1">
+                          {batchResults.map((result, index) => (
+                            <div
+                              key={`${result.email || 'item'}-${index}`}
+                              className="flex items-start justify-between gap-3 rounded-lg border bg-muted/40 px-3 py-2"
+                            >
+                              <div className="min-w-0 space-y-0.5">
+                                <div className="truncate text-sm font-medium">{result.email || `#${index + 1}`}</div>
+                                <p className="text-xs leading-5 text-muted-foreground">
+                                  {result.detail || BATCH_ACTION_LABEL[result.action || ''] || result.action || '-'}
+                                </p>
+                              </div>
+                              <Badge variant={result.ok ? 'success' : 'destructive'} className="shrink-0">
+                                {result.ok ? '成功' : '失败'}
+                              </Badge>
+                            </div>
+                          ))}
+                        </div>
+                      </ScrollArea>
+                    </div>
+                  ) : null}
+                </div>
+              </Subsection>
+
+              <Subsection
+                eyebrow="Bulk Text"
+                title="批量文本"
+                description="多段之间用只含 --- 或 === 的行分隔；单行 JSON 会按 JSONL 逐行处理。"
+              >
+                <div className="space-y-2">
+                  <Label className="sr-only">批量文本</Label>
+                  <div className="code-surface overflow-hidden rounded-xl border">
+                    <Textarea
+                      value={batchText}
+                      onChange={(event) => setBatchText(event.target.value)}
+                      className={PROBE_TEXTAREA_CLASS}
+                      placeholder={'token_v2=xxxxx\n---\n{"email":"b@example.com","cookie_header":"token_v2=yyyyy"}\n---\n{"email":"c@example.com","user_id":"...","space_id":"...","cookies":[{"name":"token_v2","value":"..."}]}'}
+                    />
+                  </div>
+                  <p className="text-xs leading-5 text-muted-foreground">
+                    每段自动识别类型：含 cookie_header / probe_json_text 的 JSON 作为完整导入请求，含 email / user_id / space_id 的 JSON 作为 Probe JSON，纯文本含 token_v2 则作为 cookie header。
+                  </p>
                 </div>
               </Subsection>
             </div>

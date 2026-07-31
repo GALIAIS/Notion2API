@@ -6,8 +6,10 @@ import type {
   AttachmentInput,
   ConversationDetailPayload,
   ConversationsPayload,
+  DiagnosticsPayload,
   HealthPayload,
   JsonResult,
+  MCPPayload,
   VersionPayload,
 } from './types';
 
@@ -63,6 +65,30 @@ export const AdminService = {
     conversation_id?: string;
   }) {
     return apiFetch<JsonResult>('/admin/test', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+  runDiagnostics(payload: { model?: string; account_email?: string; checks?: string[] }) {
+    return apiFetch<DiagnosticsPayload>('/admin/diagnostics', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+  getMCP() {
+    return apiFetch<MCPPayload>('/admin/mcp');
+  },
+  reloadMCP() {
+    return apiFetch<MCPPayload>('/admin/mcp/reload', { method: 'POST' });
+  },
+  callMCPTool(payload: { name: string; arguments?: Record<string, unknown> }) {
+    return apiFetch<JsonResult>('/admin/mcp/call', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+  batchAddAccounts(payload: JsonResult) {
+    return apiFetch<JsonResult>('/admin/accounts/batch', {
       method: 'POST',
       body: JSON.stringify(payload),
     });

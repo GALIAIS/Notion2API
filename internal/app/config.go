@@ -49,7 +49,27 @@ type SessionRefreshConfig struct {
 }
 
 type DispatchConfig struct {
-	ProbeCacheTTLSeconds int `json:"probe_cache_ttl_seconds,omitempty"`
+	ProbeCacheTTLSeconds int    `json:"probe_cache_ttl_seconds,omitempty"`
+	Strategy             string `json:"strategy,omitempty"`
+}
+
+type ToolsConfig struct {
+	Enabled          bool   `json:"enabled"`
+	PlanningMode     string `json:"planning_mode,omitempty"`
+	MaxCallsPerTurn  int    `json:"max_calls_per_turn,omitempty"`
+	MaxRounds        int    `json:"max_rounds,omitempty"`
+	ResultCharLimit  int    `json:"result_char_limit,omitempty"`
+	ParallelReadOnly bool   `json:"parallel_readonly"`
+}
+
+type MCPServerConfig struct {
+	Name       string            `json:"name"`
+	Command    string            `json:"command"`
+	Args       []string          `json:"args,omitempty"`
+	Env        map[string]string `json:"env,omitempty"`
+	Enabled    bool              `json:"enabled"`
+	TimeoutSec int               `json:"timeout_sec,omitempty"`
+	AutoStart  bool              `json:"auto_start,omitempty"`
 }
 
 type BrowserConfig struct {
@@ -179,6 +199,8 @@ type AppConfig struct {
 	LoginHelper           LoginHelperConfig    `json:"login_helper"`
 	SessionRefresh        SessionRefreshConfig `json:"session_refresh"`
 	Dispatch              DispatchConfig       `json:"dispatch"`
+	Tools                 ToolsConfig          `json:"tools"`
+	MCPServers            []MCPServerConfig    `json:"mcp_servers,omitempty"`
 	Browser               BrowserConfig        `json:"browser,omitempty"`
 	Debug                 DebugConfig          `json:"debug"`
 	Accounts              []NotionAccount      `json:"accounts,omitempty"`
@@ -469,7 +491,17 @@ func defaultConfig() AppConfig {
 		},
 		Dispatch: DispatchConfig{
 			ProbeCacheTTLSeconds: 45,
+			Strategy:             dispatchStrategyActiveFirst,
 		},
+		Tools: ToolsConfig{
+			Enabled:          true,
+			PlanningMode:     toolPlanningModeRouter,
+			MaxCallsPerTurn:  1,
+			MaxRounds:        16,
+			ResultCharLimit:  4000,
+			ParallelReadOnly: true,
+		},
+		MCPServers: []MCPServerConfig{},
 		Debug: DebugConfig{
 			PprofEnabled: false,
 			PprofAddr:    "127.0.0.1:6060",
@@ -594,6 +626,9 @@ func normalizeConfig(cfg AppConfig) AppConfig {
 	if cfg.Dispatch.ProbeCacheTTLSeconds < 0 {
 		cfg.Dispatch.ProbeCacheTTLSeconds = 0
 	}
+	cfg.Dispatch.Strategy = normalizeDispatchStrategy(cfg.Dispatch.Strategy)
+	cfg.Tools = normalizeToolsConfig(cfg.Tools)
+	cfg.MCPServers = normalizeMCPServers(cfg.MCPServers)
 	if cfg.Browser.HelperPoolSize < 0 {
 		cfg.Browser.HelperPoolSize = 0
 	}
@@ -667,6 +702,90 @@ func normalizeConfig(cfg AppConfig) AppConfig {
 		}
 	}
 	return cfg
+}
+
+const (
+	dispatchStrategyActiveFirst = "active_first"
+	dispatchStrategyRoundRobin  = "round_robin"
+	dispatchStrategyLeastUsed   = "least_used"
+)
+
+const (
+	toolPlanningModeRouter = "router"
+	toolPlanningModeNative = "native"
+)
+
+func normalizeDispatchStrategy(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case dispatchStrategyRoundRobin:
+		return dispatchStrategyRoundRobin
+	case dispatchStrategyLeastUsed:
+		return dispatchStrategyLeastUsed
+	default:
+		return dispatchStrategyActiveFirst
+	}
+}
+
+func normalizeToolPlanningMode(raw string) string {
+	if strings.EqualFold(strings.TrimSpace(raw), toolPlanningModeNative) {
+		return toolPlanningModeNative
+	}
+	return toolPlanningModeRouter
+}
+
+func normalizeToolsConfig(cfg ToolsConfig) ToolsConfig {
+	cfg.PlanningMode = normalizeToolPlanningMode(cfg.PlanningMode)
+	if cfg.MaxCallsPerTurn <= 0 {
+		cfg.MaxCallsPerTurn = 1
+	}
+	if cfg.MaxCallsPerTurn > 16 {
+		cfg.MaxCallsPerTurn = 16
+	}
+	if cfg.MaxRounds <= 0 {
+		cfg.MaxRounds = 16
+	}
+	if cfg.MaxRounds > 128 {
+		cfg.MaxRounds = 128
+	}
+	if cfg.ResultCharLimit <= 0 {
+		cfg.ResultCharLimit = 4000
+	}
+	if cfg.ResultCharLimit < 200 {
+		cfg.ResultCharLimit = 200
+	}
+	return cfg
+}
+
+func normalizeMCPServers(servers []MCPServerConfig) []MCPServerConfig {
+	if len(servers) == 0 {
+		return nil
+	}
+	out := make([]MCPServerConfig, 0, len(servers))
+	seen := map[string]struct{}{}
+	for _, server := range servers {
+		server.Name = strings.TrimSpace(server.Name)
+		server.Command = strings.TrimSpace(server.Command)
+		if server.Name == "" || server.Command == "" {
+			continue
+		}
+		key := strings.ToLower(server.Name)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		server.Args = normalizePromptTextList(server.Args)
+		if server.TimeoutSec <= 0 {
+			server.TimeoutSec = 30
+		}
+		if server.TimeoutSec > 600 {
+			server.TimeoutSec = 600
+		}
+		out = append(out, server)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func normalizeStringList(values []string) []string {

@@ -89,6 +89,16 @@ func (a *App) accountRuntimeSummary(cfg AppConfig, account NotionAccount) map[st
 		"total_failures":         account.TotalFailures,
 		"active":                 canonicalEmailKey(cfg.ActiveAccount) == getAccountEmailKey(account),
 	}
+	eligible, reason := accountDispatchEligible(cfg, account, now)
+	item["eligible"] = eligible
+	item["ineligible_reason"] = ""
+	if !eligible {
+		item["ineligible_reason"] = reason
+	}
+	remainingSlots := a.State.RemainingAccountDispatchSlots(account.Email)
+	maxConcurrency := normalizeAccountMaxConcurrency(account.MaxConcurrency)
+	item["remaining_slots"] = remainingSlots
+	item["inflight"] = maxInt(maxConcurrency-remainingSlots, 0)
 	if status, err := readLoginStatusFile(account.PendingStatePath); err == nil {
 		item["login_status"] = status
 		if text := firstNonEmpty(status.Status, account.Status); text != "" {

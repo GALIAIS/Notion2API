@@ -112,6 +112,10 @@ export function AdminConsole() {
               await loadConversations();
               return result;
             }}
+            onRunDiagnostics={(payload) => services.runDiagnostics(payload)}
+            onLoadMCP={() => services.getMCP()}
+            onReloadMCP={() => services.reloadMCP()}
+            onCallMCPTool={(payload) => services.callMCPTool(payload)}
           />
         );
       case 'conversations':
@@ -198,6 +202,11 @@ export function AdminConsole() {
               const result = await services.saveAccountSettings(payload);
               await refreshAccounts();
               await refreshConfigBundle();
+              return result;
+            }}
+            onBatchAddAccounts={async (payload) => {
+              const result = await services.batchAddAccounts(payload);
+              await refreshAll();
               return result;
             }}
           />

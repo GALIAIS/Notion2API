@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -70,12 +71,22 @@ func accountHasUsableArtifacts(cfg AppConfig, account NotionAccount) bool {
 
 func accountDispatchEligible(cfg AppConfig, account NotionAccount, now time.Time) (bool, string) {
 	account = ensureAccountPaths(cfg, account)
-	_ = now
 	if account.Disabled {
 		return false, "disabled"
 	}
 	if !accountHasUsableArtifacts(cfg, account) {
 		return false, "missing_artifacts"
+	}
+	// An account waiting for a verification code cannot serve traffic; dispatching
+	// to it only produces another auth failure.
+	if strings.EqualFold(strings.TrimSpace(account.Status), "pending_code") {
+		return false, "pending_code"
+	}
+	if accountCooldownActive(account, now) {
+		return false, "cooldown"
+	}
+	if remaining, limited := accountRemainingQuota(account, now); limited && remaining <= 0 {
+		return false, "quota_exhausted"
 	}
 	return true, "ready"
 }
@@ -136,7 +147,9 @@ func markAccountDispatchFailure(account NotionAccount, now time.Time, err error,
 			account.Status = "failed"
 		}
 	}
-	account.CooldownUntil = ""
+	// The computed backoff has to be persisted, otherwise a failing account keeps
+	// being picked first on every subsequent request.
+	account.CooldownUntil = formatRFC3339OrEmpty(now.Add(computeAccountCooldown(account, retryable)))
 	return account
 }
 
@@ -151,17 +164,29 @@ func accountReloginRecentlyStarted(account NotionAccount, now time.Time) bool {
 	return !last.IsZero() && now.Sub(last) < accountAutoReloginInterval
 }
 
+// accountTotalDispatches is the lifetime request count used by the least_used
+// strategy. Window counters reset hourly, so they cannot order accounts fairly
+// across a longer horizon.
+func accountTotalDispatches(account NotionAccount) int {
+	return account.TotalSuccesses + account.TotalFailures
+}
+
 func sortDispatchCandidates(cfg AppConfig, accounts []NotionAccount, now time.Time) {
+	strategy := normalizeDispatchStrategy(cfg.Dispatch.Strategy)
 	activeKey := canonicalEmailKey(cfg.ActiveAccount)
 	sort.Slice(accounts, func(i, j int) bool {
 		left := accounts[i]
 		right := accounts[j]
 		leftKey := getAccountEmailKey(left)
 		rightKey := getAccountEmailKey(right)
-		leftActive := leftKey == activeKey
-		rightActive := rightKey == activeKey
-		if leftActive != rightActive {
-			return leftActive
+		// Only active_first pins the active account to the front. The balancing
+		// strategies must not, or one account would absorb every request.
+		if strategy == dispatchStrategyActiveFirst {
+			leftActive := leftKey == activeKey
+			rightActive := rightKey == activeKey
+			if leftActive != rightActive {
+				return leftActive
+			}
 		}
 		if left.Priority != right.Priority {
 			return left.Priority > right.Priority
@@ -177,6 +202,15 @@ func sortDispatchCandidates(cfg AppConfig, accounts []NotionAccount, now time.Ti
 		if left.ConsecutiveFailures != right.ConsecutiveFailures {
 			return left.ConsecutiveFailures < right.ConsecutiveFailures
 		}
+		// least_used balances by lifetime volume before falling back to recency,
+		// so a freshly added account drains the backlog of a heavily used one.
+		if strategy == dispatchStrategyLeastUsed {
+			leftTotal := accountTotalDispatches(left)
+			rightTotal := accountTotalDispatches(right)
+			if leftTotal != rightTotal {
+				return leftTotal < rightTotal
+			}
+		}
 		leftUsed := parseOptionalRFC3339(left.LastUsedAt)
 		rightUsed := parseOptionalRFC3339(right.LastUsedAt)
 		if leftUsed.IsZero() != rightUsed.IsZero() {
@@ -187,6 +221,38 @@ func sortDispatchCandidates(cfg AppConfig, accounts []NotionAccount, now time.Ti
 		}
 		return leftKey < rightKey
 	})
+}
+
+// dispatchRotationCursor advances once per dispatched request under the
+// round_robin strategy. It lives outside the config snapshot on purpose: the
+// snapshot is only rebuilt on config changes, so rotating during the sort would
+// hand every request the same head account.
+var dispatchRotationCursor atomic.Uint64
+
+// rotateDispatchCandidates returns the candidate list rotated by the shared
+// cursor, spreading consecutive requests across accounts while preserving the
+// relative order used as fallback sequence.
+func rotateDispatchCandidates(accounts []NotionAccount) []NotionAccount {
+	if len(accounts) < 2 {
+		return accounts
+	}
+	offset := int(dispatchRotationCursor.Add(1)-1) % len(accounts)
+	if offset == 0 {
+		return accounts
+	}
+	rotated := make([]NotionAccount, 0, len(accounts))
+	rotated = append(rotated, accounts[offset:]...)
+	rotated = append(rotated, accounts[:offset]...)
+	return rotated
+}
+
+// applyDispatchStrategyRotation is the per-request hook for strategies that must
+// not always start from the same account.
+func applyDispatchStrategyRotation(cfg AppConfig, accounts []NotionAccount) []NotionAccount {
+	if normalizeDispatchStrategy(cfg.Dispatch.Strategy) != dispatchStrategyRoundRobin {
+		return accounts
+	}
+	return rotateDispatchCandidates(accounts)
 }
 
 func buildDispatchCandidateOrder(cfg AppConfig, now time.Time) []NotionAccount {

@@ -1,0 +1,126 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: Go build & test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./...
+
+      # The MCP client runs a reader goroutine per subprocess and dispatches
+      # responses through a shared pending map, so the race detector is the check
+      # that matters most here. It needs cgo, which is why this only runs in CI.
+      - name: Test with race detector
+        run: go test -race ./...
+
+  frontend:
+    name: Frontend typecheck & build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm --prefix ./frontend ci
+
+      - name: Typecheck
+        run: npm --prefix ./frontend run typecheck
+
+      - name: Build static admin bundle
+        run: npm --prefix ./frontend run build:static
+
+      # static/admin is committed, so report when a source change was pushed
+      # without rebuilding it. Chunk filenames are content-hashed and depend on
+      # the toolchain version, so this informs rather than fails the run.
+      - name: Report static bundle drift
+        run: |
+          if [[ -n "$(git status --porcelain static/admin)" ]]; then
+            echo "::warning::static/admin differs from a fresh build. Run 'npm --prefix ./frontend run build:static' and commit the result if the admin UI changed."
+            git status --short static/admin
+          else
+            echo "static/admin matches a fresh build."
+          fi
+
+  docker:
+    name: Docker image build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Validation only: builds linux/amd64 and loads it locally without
+      # pushing. Publishing multi-arch images to GHCR stays in docker-image.yml,
+      # which runs on pushes to the default branch and on tags.
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: notion2api:ci
+          cache-from: type=gha,scope=ci-amd64
+          cache-to: type=gha,mode=max,scope=ci-amd64
+
+      - name: Verify the image boots and serves /healthz
+        run: |
+          set -euo pipefail
+          docker run -d --name notion2api-ci -p 8787:8787 notion2api:ci
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8787/healthz > /tmp/healthz.json 2>/dev/null; then
+              echo "healthz responded after ${attempt}s:"
+              cat /tmp/healthz.json
+              docker rm -f notion2api-ci > /dev/null
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::/healthz did not respond within 30s"
+          docker logs notion2api-ci
+          docker rm -f notion2api-ci > /dev/null
+          exit 1
+
+      - name: Report image size
+        run: docker image ls notion2api:ci --format '{{.Repository}}:{{.Tag}} {{.Size}}'
